@@ -72,6 +72,11 @@ export abstract class PolyXElement extends HTMLElement {
 
   connectedCallback() {
     this._isConnected = true;
+    // Restore props set by parent before this element was upgraded
+    if ((this as any).__pendingPolyXProps) {
+      Object.assign(this._props, (this as any).__pendingPolyXProps);
+      delete (this as any).__pendingPolyXProps;
+    }
     if (!this._hasMounted) {
       this._mount();
     } else {
@@ -232,8 +237,15 @@ export abstract class PolyXElement extends HTMLElement {
   // Set a prop on a child component element at a given marker index
   protected _setDynamicProp(index: number, propName: string, value: any) {
     const childEl = this._childElements.get(index);
-    if (childEl && '_setProp' in childEl) {
+    if (!childEl) return;
+    if ('_setProp' in childEl) {
       (childEl as any)._setProp(propName, value);
+    } else {
+      // Element not yet upgraded — store pending props for connectedCallback
+      if (!(childEl as any).__pendingPolyXProps) {
+        (childEl as any).__pendingPolyXProps = {};
+      }
+      (childEl as any).__pendingPolyXProps[propName] = value;
     }
   }
 
@@ -253,8 +265,13 @@ export abstract class PolyXElement extends HTMLElement {
   // Create or reuse a child component element with props
   protected _createChild(tagName: string, props?: Record<string, any>): HTMLElement {
     const el = document.createElement(tagName);
-    if (props && '_setProps' in el) {
-      (el as any)._setProps(props);
+    if (props) {
+      if ('_setProps' in el) {
+        (el as any)._setProps(props);
+      } else {
+        // Element not yet upgraded — store pending props for connectedCallback
+        (el as any).__pendingPolyXProps = props;
+      }
     }
     return el;
   }

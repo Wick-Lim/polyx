@@ -82,6 +82,11 @@ function isComponentTag(name: string): boolean {
   return /^[A-Z]/.test(name);
 }
 
+const VOID_ELEMENTS = new Set([
+  'area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input',
+  'link', 'meta', 'param', 'source', 'track', 'wbr',
+]);
+
 function transformComponent(
   ast: t.File,
   path: NodePath<t.FunctionDeclaration | t.VariableDeclarator>,
@@ -215,7 +220,16 @@ function transformComponent(
               t.stringLiteral(state.name),
               t.conditionalExpression(
                 t.binaryExpression('===', t.unaryExpression('typeof', t.identifier('val')), t.stringLiteral('function')),
-                t.callExpression(t.identifier('val'), [t.identifier(state.name)]),
+                t.callExpression(t.identifier('val'), [
+                  t.conditionalExpression(
+                    t.binaryExpression('!==',
+                      t.memberExpression(t.memberExpression(t.thisExpression(), t.identifier('_state')), t.identifier(state.name)),
+                      t.identifier('undefined')
+                    ),
+                    t.memberExpression(t.memberExpression(t.thisExpression(), t.identifier('_state')), t.identifier(state.name)),
+                    state.default
+                  )
+                ]),
                 t.identifier('val')
               )
             ]
@@ -376,7 +390,22 @@ function transformComponent(
   );
 
   // 5. Fine-grained reactivity: per-state update methods
-  if (states.length > 0) {
+  // Skip when component body uses hooks that create derived values (useMemo, useCallback, etc.)
+  // because _renderState_* methods can't re-execute those hooks
+  const derivedHookNames = new Set(['useMemo', 'useCallback', 'useEffect', 'useLayoutEffect', 'useRef', 'useContext']);
+  let hasDerivedHooks = false;
+  const bodyCheckAST = t.file(t.program(filteredBody, [], 'module'));
+  traverse(bodyCheckAST, {
+    CallExpression(checkPath: NodePath<t.CallExpression>) {
+      if (t.isIdentifier(checkPath.node.callee) && derivedHookNames.has(checkPath.node.callee.name)) {
+        hasDerivedHooks = true;
+        checkPath.stop();
+      }
+    },
+    noScope: true
+  });
+
+  if (states.length > 0 && !hasDerivedHooks) {
     const stateNames = new Set(states.map(s => s.name));
 
     // Build per-state dependency map
@@ -689,6 +718,7 @@ function transformJSXInExpressions(ast: t.File): void {
 // Convert a JSX element to an expression:
 // - For component elements with props: this._createChild("polyx-name", { prop1: val1, ... })
 // - For component elements without props: "polyx-name" (string literal)
+// - For component elements with children: IIFE that creates parent, appends children, returns parent
 // - For HTML elements: "tagname" (string literal)
 function jsxElementToExpression(node: t.JSXElement): t.Expression {
   const tagName = getTagName(node.openingElement.name);
@@ -718,32 +748,85 @@ function jsxElementToExpression(node: t.JSXElement): t.Expression {
       }
     }
 
-    // Handle children — compile to static HTML string for children prop
-    const childTexts: string[] = [];
-    let hasChildren = false;
+    // Collect children as DOM-creating expressions
+    const childAppendExprs: t.Expression[] = [];
     for (const child of node.children) {
       if (t.isJSXText(child)) {
         const text = child.value;
         if (text.trim() === '' && text.includes('\n')) continue;
-        childTexts.push(escapeHTML(text));
-        hasChildren = true;
+        childAppendExprs.push(
+          t.callExpression(
+            t.memberExpression(t.identifier('document'), t.identifier('createTextNode')),
+            [t.stringLiteral(text)]
+          )
+        );
       } else if (t.isJSXElement(child)) {
-        // Nested child component/element — simplified as tag string for now
-        const childTag = getTagName(child.openingElement.name);
-        childTexts.push(`<${childTag}></${childTag}>`);
-        hasChildren = true;
+        // Still a JSXElement — convert recursively, ensure it produces a Node
+        childAppendExprs.push(ensureNodeExpression(jsxElementToExpression(child)));
+      } else if (t.isJSXExpressionContainer(child)) {
+        if (!t.isJSXEmptyExpression(child.expression)) {
+          childAppendExprs.push(child.expression as t.Expression);
+        }
+      } else if (t.isJSXFragment(child)) {
+        childAppendExprs.push(jsxFragmentToExpression(child));
+      } else {
+        // Already-transformed expression from exit traversal (CallExpression, StringLiteral, etc.)
+        childAppendExprs.push(ensureNodeExpression(child as unknown as t.Expression));
       }
     }
 
-    if (hasChildren) {
-      propEntries.push(
-        t.objectProperty(
-          t.identifier('children'),
-          t.stringLiteral(childTexts.join(''))
-        )
+    // If children present, use IIFE: create parent, append children, return parent
+    if (childAppendExprs.length > 0) {
+      const stmts: t.Statement[] = [];
+
+      // const _el = this._createChild("polyx-tag", {props});
+      const createArgs: t.Expression[] = [t.stringLiteral(tagName)];
+      if (propEntries.length > 0) {
+        createArgs.push(t.objectExpression(propEntries));
+      }
+      stmts.push(
+        t.variableDeclaration('const', [
+          t.variableDeclarator(
+            t.identifier('_el'),
+            t.callExpression(
+              t.memberExpression(t.thisExpression(), t.identifier('_createChild')),
+              createArgs
+            )
+          )
+        ])
+      );
+
+      // Append each child with instanceof Node guard
+      childAppendExprs.forEach((expr, i) => {
+        const tempId = t.identifier(`_c${i}`);
+        stmts.push(
+          t.variableDeclaration('const', [
+            t.variableDeclarator(tempId, expr)
+          ])
+        );
+        stmts.push(
+          t.ifStatement(
+            t.binaryExpression('instanceof', tempId, t.identifier('Node')),
+            t.expressionStatement(
+              t.callExpression(
+                t.memberExpression(t.identifier('_el'), t.identifier('appendChild')),
+                [tempId]
+              )
+            )
+          )
+        );
+      });
+
+      // return _el;
+      stmts.push(t.returnStatement(t.identifier('_el')));
+
+      return t.callExpression(
+        t.arrowFunctionExpression([], t.blockStatement(stmts)),
+        []
       );
     }
 
+    // No children
     if (propEntries.length > 0) {
       return t.callExpression(
         t.memberExpression(t.thisExpression(), t.identifier('_createChild')),
@@ -754,6 +837,18 @@ function jsxElementToExpression(node: t.JSXElement): t.Expression {
   }
 
   return t.stringLiteral(tagName);
+}
+
+// Ensure an expression evaluates to a DOM Node (not a string tag name)
+function ensureNodeExpression(expr: t.Expression): t.Expression {
+  if (t.isStringLiteral(expr)) {
+    // Tag name string like "polyx-foo" or "div" → document.createElement()
+    return t.callExpression(
+      t.memberExpression(t.identifier('document'), t.identifier('createElement')),
+      [expr]
+    );
+  }
+  return expr;
 }
 
 // Convert a JSX fragment to an expression:
@@ -795,11 +890,12 @@ function jsxToTemplate(
   dynamicChildProps: { childIdx: number; name: string; expr: t.Expression }[],
   dynamicSpreads: DynamicSpread[],
   getElementIdx: () => number,
-  getChildIdx: () => number
+  getChildIdx: () => number,
+  parentTag?: string
 ): string {
   if (t.isJSXFragment(node)) {
     return node.children
-      .map(child => jsxChildToTemplate(child, dynamicValues, dynamicAttrs, dynamicEvents, dynamicChildProps, dynamicSpreads, getElementIdx, getChildIdx))
+      .map(child => jsxChildToTemplate(child, dynamicValues, dynamicAttrs, dynamicEvents, dynamicChildProps, dynamicSpreads, getElementIdx, getChildIdx, parentTag))
       .filter(Boolean)
       .join('');
   }
@@ -815,8 +911,13 @@ function jsxToTemplate(
 
   const attrs = processAttributes(node.openingElement.attributes, elementIdx, dynamicAttrs, dynamicEvents, dynamicSpreads);
 
+  // Void elements (input, br, img, etc.) have no closing tag in HTML
+  if (VOID_ELEMENTS.has(tagName)) {
+    return `<${tagName}${attrs}>`;
+  }
+
   const children = node.children
-    .map(child => jsxChildToTemplate(child, dynamicValues, dynamicAttrs, dynamicEvents, dynamicChildProps, dynamicSpreads, getElementIdx, getChildIdx))
+    .map(child => jsxChildToTemplate(child, dynamicValues, dynamicAttrs, dynamicEvents, dynamicChildProps, dynamicSpreads, getElementIdx, getChildIdx, tagName))
     .filter(Boolean)
     .join('');
 
@@ -860,7 +961,7 @@ function processComponentElement(
 
   // Process children content — compile child nodes into HTML that goes inside the component element
   const childrenHTML = node.children
-    .map(child => jsxChildToTemplate(child, dynamicValues, dynamicAttrs, dynamicEvents, dynamicChildProps, dynamicSpreads, getElementIdx, getChildIdx))
+    .map(child => jsxChildToTemplate(child, dynamicValues, dynamicAttrs, dynamicEvents, dynamicChildProps, dynamicSpreads, getElementIdx, getChildIdx, undefined))
     .filter(Boolean)
     .join('');
 
@@ -878,7 +979,8 @@ function jsxChildToTemplate(
   dynamicChildProps: { childIdx: number; name: string; expr: t.Expression }[],
   dynamicSpreads: DynamicSpread[],
   getElementIdx: () => number,
-  getChildIdx: () => number
+  getChildIdx: () => number,
+  parentTag?: string
 ): string {
   if (t.isJSXText(child)) {
     const text = child.value;
@@ -889,17 +991,28 @@ function jsxChildToTemplate(
   if (t.isJSXExpressionContainer(child)) {
     if (t.isJSXEmptyExpression(child.expression)) return '';
 
+    // Inside <style> tags, inline string/template literals as static CSS text
+    if (parentTag === 'style') {
+      const expr = child.expression;
+      if (t.isStringLiteral(expr)) {
+        return expr.value;
+      }
+      if (t.isTemplateLiteral(expr) && expr.expressions.length === 0) {
+        return expr.quasis[0].value.cooked || expr.quasis[0].value.raw;
+      }
+    }
+
     const slotIdx = dynamicValues.length;
     dynamicValues.push({ expr: child.expression as t.Expression, slotIdx });
     return `<span data-dyn="${slotIdx}"></span>`;
   }
 
   if (t.isJSXElement(child)) {
-    return jsxToTemplate(child, dynamicValues, dynamicAttrs, dynamicEvents, dynamicChildProps, dynamicSpreads, getElementIdx, getChildIdx);
+    return jsxToTemplate(child, dynamicValues, dynamicAttrs, dynamicEvents, dynamicChildProps, dynamicSpreads, getElementIdx, getChildIdx, parentTag);
   }
 
   if (t.isJSXFragment(child)) {
-    return jsxToTemplate(child, dynamicValues, dynamicAttrs, dynamicEvents, dynamicChildProps, dynamicSpreads, getElementIdx, getChildIdx);
+    return jsxToTemplate(child, dynamicValues, dynamicAttrs, dynamicEvents, dynamicChildProps, dynamicSpreads, getElementIdx, getChildIdx, parentTag);
   }
 
   return '';
