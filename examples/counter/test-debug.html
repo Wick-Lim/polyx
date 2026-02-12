@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>PolyX Debug</title>
+  <style>
+    body { font-family: sans-serif; padding: 20px; }
+    .log { background: #f0f0f0; padding: 10px; margin: 10px 0; font-family: monospace; }
+    .error { background: #ffcccc; color: red; }
+    polyx-test { display: block; border: 2px solid green; min-height: 50px; }
+  </style>
+</head>
+<body>
+  <h1>PolyX Debug</h1>
+  <div id="logs"></div>
+  <polyx-test></polyx-test>
+
+  <script type="module">
+    const logs = document.getElementById('logs');
+    
+    function log(msg, isError = false) {
+      console.log(msg);
+      const div = document.createElement('div');
+      div.className = 'log' + (isError ? ' error' : '');
+      div.textContent = msg;
+      logs.appendChild(div);
+    }
+
+    window.onerror = (msg, url, line) => {
+      log('ERROR: ' + msg + ' at line ' + line, true);
+    };
+
+    try {
+      log('Starting...');
+      
+      // Inline runtime for testing
+      const templateCache = new Map();
+      
+      function createTemplate(html) {
+        if (templateCache.has(html)) return templateCache.get(html);
+        const template = document.createElement('template');
+        template.innerHTML = html;
+        templateCache.set(html, template);
+        return template;
+      }
+
+      class PolyXElement extends HTMLElement {
+        constructor() {
+          super();
+          this._instance = {
+            hooks: [], hookIndex: 0, effects: [], layoutEffects: [],
+            element: this, render: () => this._scheduleRender()
+          };
+          this._isConnected = false;
+          this._renderScheduled = false;
+        }
+        
+        connectedCallback() {
+          this._isConnected = true;
+          this._mount();
+        }
+        
+        _mount() {
+          this._renderComponent();
+        }
+        
+        _renderComponent() {
+          this._instance.hookIndex = 0;
+          this._instance.effects = [];
+          this._instance.layoutEffects = [];
+          
+          this.innerHTML = '';
+          const content = this._render();
+          this.appendChild(content);
+          
+          this._runLayoutEffects();
+          queueMicrotask(() => this._runEffects());
+        }
+        
+        _scheduleRender() {
+          if (this._renderScheduled || !this._isConnected) return;
+          this._renderScheduled = true;
+          queueMicrotask(() => {
+            this._renderScheduled = false;
+            if (this._isConnected) this._renderComponent();
+          });
+        }
+        
+        _runEffects() {
+          this._instance.effects.forEach(effect => {
+            if (effect.cleanup) effect.cleanup();
+            const cleanup = effect.callback();
+            if (cleanup) effect.cleanup = cleanup;
+          });
+          this._instance.effects = [];
+        }
+        
+        _runLayoutEffects() {
+          this._instance.layoutEffects.forEach(effect => {
+            if (effect.cleanup) effect.cleanup();
+            const cleanup = effect.callback();
+            if (cleanup) effect.cleanup = cleanup;
+          });
+          this._instance.layoutEffects = [];
+        }
+        
+        _setDynamicValue(content, index, value) {
+          const marker = content.querySelector(`[data-dyn="${index}"]`);
+          if (marker) {
+            if (value === false || value === null || value === undefined) {
+              marker.remove();
+            } else if (value instanceof Node) {
+              marker.replaceWith(value);
+            } else if (typeof value === 'string' && value.startsWith('polyx-')) {
+              const element = document.createElement(value);
+              marker.replaceWith(element);
+            } else {
+              marker.replaceWith(document.createTextNode(String(value)));
+            }
+          }
+        }
+        
+        _setDynamicEvent(content, index, eventName, handler) {
+          const element = content.querySelector(`[data-event-${eventName}="${index}"]`);
+          if (element) {
+            element.removeAttribute(`data-event-${eventName}`);
+            element.addEventListener(eventName, handler);
+          }
+        }
+      }
+
+      let currentInstance = null;
+      let currentHookIndex = 0;
+      
+      function getHookState(initialState) {
+        const instance = currentInstance;
+        const index = currentHookIndex++;
+        if (instance.hooks.length <= index) {
+          instance.hooks.push(initialState);
+        }
+        return { state: instance.hooks[index], index };
+      }
+      
+      function useState(initialState) {
+        const { state, index } = getHookState(initialState);
+        const setState = (updater) => {
+          const newState = typeof updater === 'function' ? updater(currentInstance.hooks[index]) : updater;
+          if (newState !== currentInstance.hooks[index]) {
+            currentInstance.hooks[index] = newState;
+            currentInstance.render();
+          }
+        };
+        return [state, setState];
+      }
+
+      // Define test component inline
+      class TestElement extends PolyXElement {
+        _render() {
+          currentInstance = this._instance;
+          currentHookIndex = 0;
+          
+          try {
+            this.constructor.template = this.constructor.template || createTemplate('<div style="padding: 20px; background: lightblue;"><h1>Test Works!</h1><p>Count:<span data-dyn="0"></span></p><button data-event-click="0">Click</button></div>');
+            const content = this.constructor.template.cloneNode(true);
+            const [count, setCount] = useState(0);
+            this._setDynamicValue(content, 0, count);
+            this._setDynamicEvent(content, 0, "click", () => setCount(c => c + 1));
+            return content;
+          } finally {
+            currentInstance = null;
+          }
+        }
+      }
+      
+      customElements.define("polyx-test", TestElement);
+      log('polyx-test registered');
+      
+      // Manually trigger rendering
+      setTimeout(() => {
+        const el = document.querySelector('polyx-test');
+        log('polyx-test found: ' + (el ? 'yes' : 'no'));
+        if (el) {
+          log('polyx-test innerHTML: ' + el.innerHTML.substring(0, 100));
+        }
+      }, 100);
+      
+    } catch (err) {
+      log('ERROR: ' + err.message, true);
+      console.error(err);
+    }
+  </script>
+</body>
+</html>

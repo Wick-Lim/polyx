@@ -1,0 +1,30 @@
+{
+  "name": "@polyx/compiler",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch"
+  },
+"dependencies": {
+    "@polyx/core": "file:../core",
+    "@babel/core": "^7.23.0",
+    "@babel/parser": "^7.23.0",
+    "@babel/types": "^7.23.0",
+    "@babel/traverse": "^7.23.0",
+    "@babel/generator": "^7.23.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.3.0",
+    "@types/babel__core": "^7.20.0",
+    "@types/babel__traverse": "^7.20.0"
+  }
+}
