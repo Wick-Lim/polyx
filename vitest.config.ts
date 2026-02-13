@@ -1,4 +1,5 @@
 import { defineConfig } from 'vitest/config';
+import { resolve } from 'path';
 
 export default defineConfig({
   test: {
@@ -13,10 +14,10 @@ export default defineConfig({
   },
   resolve: {
     alias: {
-      '@polyx/core': '/Users/wick/Documents/workspaces/polyx/packages/core/src/index.ts',
-      '@polyx/runtime': '/Users/wick/Documents/workspaces/polyx/packages/runtime/src/index.ts',
-      '@polyx/compiler': '/Users/wick/Documents/workspaces/polyx/packages/compiler/src/index.ts',
-      '@polyx/ssr': '/Users/wick/Documents/workspaces/polyx/packages/ssr/src/index.ts',
+      '@polyx/core': resolve(__dirname, 'packages/core/src/index.ts'),
+      '@polyx/runtime': resolve(__dirname, 'packages/runtime/src/index.ts'),
+      '@polyx/compiler': resolve(__dirname, 'packages/compiler/src/index.ts'),
+      '@polyx/ssr': resolve(__dirname, 'packages/ssr/src/index.ts'),
     },
   },
 });

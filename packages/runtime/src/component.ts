@@ -31,11 +31,15 @@ export abstract class PolyXElement extends HTMLElement {
   protected _props: Props = {};
   // Dynamic node markers cache
   protected _valueMarkers: (Node | Comment)[] = [];
+  protected _valueCache: any[] = [];
+  // Unified element references indexed by marker idx
+  protected _elements: HTMLElement[] = [];
+  // Legacy maps kept for backward compat during transition
   protected _dynamicElements: Map<string, HTMLElement[]> = new Map();
-  // Child component element references (for prop passing)
   protected _childElements: Map<number, HTMLElement> = new Map();
   // Array children tracking for list reconciliation
   private _arrayChildren: Map<number, Node[]> = new Map();
+  private _arrayValues: Map<number, any[]> = new Map();
 
   constructor() {
     super();
@@ -177,7 +181,9 @@ export abstract class PolyXElement extends HTMLElement {
       this._render();
 
       this._runLayoutEffects();
-      queueMicrotask(() => this._runEffects());
+      if (this._instance.effects.length > 0) {
+        queueMicrotask(() => this._runEffects());
+      }
     } catch (error) {
       console.error('Update error:', error);
     } finally {
@@ -186,48 +192,61 @@ export abstract class PolyXElement extends HTMLElement {
   }
 
   protected _setDynamicValue(index: number, value: any) {
+    // Skip Arrays from cache check — they need reconciliation every time
+    if (!Array.isArray(value) && this._valueCache[index] === value) {
+      return; // Reference equality: skip unchanged primitives and objects
+    }
+
     const current = this._valueMarkers[index];
+    this._valueCache[index] = value;
+
+    if (Array.isArray(value)) {
+      // Array list rendering with reconciliation
+      const marker = current;
+      const oldNodes = this._arrayChildren.get(index) || [];
+      const oldValues = this._arrayValues.get(index) || [];
+      const newNodes = reconcileNonKeyed(
+        marker.parentNode || this,
+        marker,
+        oldNodes,
+        value,
+        oldValues,
+        this._createNodeFromValue.bind(this)
+      );
+      this._arrayChildren.set(index, newNodes);
+      this._arrayValues.set(index, [...value]);
+      return; // Don't replace the marker itself
+    }
+
     let newNode: Node;
 
     if (value === false || value === null || value === undefined) {
       newNode = document.createComment('falsy');
     } else if (value instanceof DocumentFragment) {
-      // Children / fragment: wrap in a container span for future updates
       const wrapper = document.createElement('span');
       wrapper.style.display = 'contents';
       wrapper.appendChild(value);
       newNode = wrapper;
     } else if (value instanceof Node) {
       newNode = value;
-    } else if (Array.isArray(value)) {
-      // Array list rendering with reconciliation
-      const marker = current;
-      const oldNodes = this._arrayChildren.get(index) || [];
-      const newNodes = reconcileNonKeyed(
-        marker.parentNode || this,
-        marker,
-        oldNodes,
-        value,
-        this._createNodeFromValue.bind(this)
-      );
-      this._arrayChildren.set(index, newNodes);
-      return; // Don't replace the marker itself
     } else if (typeof value === 'string' && value.startsWith('polyx-')) {
       const childEl = document.createElement(value);
       this._childElements.set(index, childEl);
       newNode = childEl;
     } else {
-      newNode = document.createTextNode(String(value));
+      // Primitive text: fast path — update textContent directly if current is TextNode
+      const strVal = String(value);
+      if (current && current.nodeType === Node.TEXT_NODE) {
+        if (current.textContent !== strVal) {
+          current.textContent = strVal;
+        }
+        return;
+      }
+      newNode = document.createTextNode(strVal);
     }
 
     if (current && current !== newNode) {
       if (current.parentNode) {
-        if (current.nodeType === Node.TEXT_NODE && newNode.nodeType === Node.TEXT_NODE) {
-          if (current.textContent !== newNode.textContent) {
-            current.textContent = newNode.textContent;
-          }
-          return;
-        }
         current.parentNode.replaceChild(newNode, current);
       }
       this._valueMarkers[index] = newNode;
@@ -236,12 +255,11 @@ export abstract class PolyXElement extends HTMLElement {
 
   // Set a prop on a child component element at a given marker index
   protected _setDynamicProp(index: number, propName: string, value: any) {
-    const childEl = this._childElements.get(index);
+    const childEl = this._elements[index] || this._childElements.get(index);
     if (!childEl) return;
     if ('_setProp' in childEl) {
       (childEl as any)._setProp(propName, value);
     } else {
-      // Element not yet upgraded — store pending props for connectedCallback
       if (!(childEl as any).__pendingPolyXProps) {
         (childEl as any).__pendingPolyXProps = {};
       }
@@ -277,11 +295,8 @@ export abstract class PolyXElement extends HTMLElement {
   }
 
   protected _setDynamicAttribute(index: number, attrName: string, value: any) {
-    const key = `attr-${attrName}-${index}`;
-    const elements = this._dynamicElements.get(key);
-    if (!elements) return;
-
-    elements.forEach(el => {
+    const el = this._elements[index];
+    if (el) {
       if (value === false || value === null || value === undefined) {
         el.removeAttribute(attrName);
       } else {
@@ -290,20 +305,30 @@ export abstract class PolyXElement extends HTMLElement {
           el.setAttribute(attrName, strVal);
         }
       }
+      return;
+    }
+    // Fallback to legacy map for backward compat
+    const key = `attr-${attrName}-${index}`;
+    const elements = this._dynamicElements.get(key);
+    if (!elements) return;
+    elements.forEach(legacyEl => {
+      if (value === false || value === null || value === undefined) {
+        legacyEl.removeAttribute(attrName);
+      } else {
+        const strVal = value === true ? '' : String(value);
+        if (legacyEl.getAttribute(attrName) !== strVal) {
+          legacyEl.setAttribute(attrName, strVal);
+        }
+      }
     });
   }
 
   protected _setDynamicEvent(index: number, eventName: string, handler: Function) {
-    const key = `event-${eventName}-${index}`;
-    const elements = this._dynamicElements.get(key);
-    if (!elements) return;
-
-    elements.forEach(el => {
+    const el = this._elements[index];
+    if (el) {
       const storageKey = `__polyx_evt_${eventName}`;
       const wrapperKey = `__polyx_wrap_${eventName}`;
-
       (el as any)[storageKey] = handler;
-
       if (!(el as any)[wrapperKey]) {
         const wrapper: EventListener = (event: Event) => {
           const currentHandler = (el as any)[storageKey];
@@ -312,43 +337,68 @@ export abstract class PolyXElement extends HTMLElement {
         (el as any)[wrapperKey] = wrapper;
         el.addEventListener(eventName, wrapper);
       }
+      return;
+    }
+    // Fallback to legacy map
+    const key = `event-${eventName}-${index}`;
+    const elements = this._dynamicElements.get(key);
+    if (!elements) return;
+    elements.forEach(legacyEl => {
+      const storageKey = `__polyx_evt_${eventName}`;
+      const wrapperKey = `__polyx_wrap_${eventName}`;
+      (legacyEl as any)[storageKey] = handler;
+      if (!(legacyEl as any)[wrapperKey]) {
+        const wrapper: EventListener = (event: Event) => {
+          const currentHandler = (legacyEl as any)[storageKey];
+          if (currentHandler) currentHandler(event);
+        };
+        (legacyEl as any)[wrapperKey] = wrapper;
+        legacyEl.addEventListener(eventName, wrapper);
+      }
     });
   }
 
   // Apply spread attributes to an element
   protected _setDynamicSpread(index: number, props: Record<string, any>) {
+    const el = this._elements[index];
+    if (el) {
+      this._applySpreadToElement(el, props);
+      return;
+    }
+    // Fallback to legacy map
     const key = `spread-${index}`;
     const elements = this._dynamicElements.get(key);
     if (!elements) return;
+    elements.forEach(legacyEl => this._applySpreadToElement(legacyEl, props));
+  }
 
-    elements.forEach(el => {
-      for (const [name, value] of Object.entries(props)) {
-        if (name === 'key' || name === 'ref' || name === 'children') continue;
+  private _applySpreadToElement(el: HTMLElement, props: Record<string, any>) {
+    for (const [name, value] of Object.entries(props)) {
+      if (name === 'key' || name === 'ref' || name === 'children') continue;
 
-        if (name === 'className' || name === 'class') {
-          el.setAttribute('class', String(value));
-        } else if (name.startsWith('on') && typeof value === 'function') {
-          const eventName = name.slice(2).toLowerCase();
-          const storageKey = `__polyx_evt_${eventName}`;
-          const wrapperKey = `__polyx_wrap_${eventName}`;
-          (el as any)[storageKey] = value;
-          if (!(el as any)[wrapperKey]) {
-            const wrapper: EventListener = (event: Event) => {
-              const currentHandler = (el as any)[storageKey];
-              if (currentHandler) currentHandler(event);
-            };
-            (el as any)[wrapperKey] = wrapper;
-            el.addEventListener(eventName, wrapper);
-          }
-        } else if (value === false || value === null || value === undefined) {
-          el.removeAttribute(name);
-        } else if (value === true) {
-          el.setAttribute(name, '');
-        } else {
-          el.setAttribute(name, String(value));
+      if (name === 'className' || name === 'class') {
+        el.setAttribute('class', String(value));
+      } else if (name.startsWith('on') && typeof value === 'function') {
+        const eventName = name.slice(2).toLowerCase();
+        const storageKey = `__polyx_evt_${eventName}`;
+        const wrapperKey = `__polyx_wrap_${eventName}`;
+        (el as any)[storageKey] = value;
+        if (!(el as any)[wrapperKey]) {
+          const wrapper: EventListener = (event: Event) => {
+            const currentHandler = (el as any)[storageKey];
+            if (currentHandler) currentHandler(event);
+          };
+          (el as any)[wrapperKey] = wrapper;
+          el.addEventListener(eventName, wrapper);
         }
+      } else if (value === false || value === null || value === undefined) {
+        el.removeAttribute(name);
+      } else if (value === true) {
+        el.setAttribute(name, '');
+      } else {
+        el.setAttribute(name, String(value));
       }
-    });
+    }
   }
 
   private _mount() {
@@ -392,12 +442,23 @@ export abstract class PolyXElement extends HTMLElement {
 
   // Scan a DOM tree for dynamic element markers
   private _scanDynamicElements(root: DocumentFragment | HTMLElement) {
+    // Unified scan: data-px-el markers
+    root.querySelectorAll('[data-px-el]').forEach(el => {
+      const element = el as HTMLElement;
+      const idx = parseInt(element.getAttribute('data-px-el')!);
+      this._elements[idx] = element;
+      // Also populate legacy maps for child elements (component tags)
+      this._childElements.set(idx, element);
+    });
+
+    // Legacy scan for backward compat (data-attr-*, data-event-*, data-spread, data-child-idx)
     root.querySelectorAll('*').forEach(el => {
       const element = el as HTMLElement;
       [...element.attributes].forEach(attr => {
         if (attr.name === 'data-child-idx') {
           const idx = parseInt(attr.value);
           this._childElements.set(idx, element);
+          this._elements[idx] = element;
         } else if (attr.name.startsWith('data-attr-')) {
           const attrName = attr.name.slice(10);
           const key = `attr-${attrName}-${attr.value}`;
@@ -430,7 +491,7 @@ export abstract class PolyXElement extends HTMLElement {
       }
     }
 
-    // Scan for dynamic elements in existing DOM
+    // Scan for unified and legacy dynamic elements in existing DOM
     this._scanDynamicElements(this as any);
   }
 
@@ -465,6 +526,23 @@ export abstract class PolyXElement extends HTMLElement {
       }
     });
 
+    // Cleanup events from unified _elements
+    this._elements.forEach(el => {
+      if (!el) return;
+      [...Object.keys(el)].forEach((key: string) => {
+        if (key.startsWith('__polyx_wrap_')) {
+          const eventName = key.slice(13);
+          const wrapper = (el as any)[key];
+          if (wrapper) {
+            el.removeEventListener(eventName, wrapper);
+            (el as any)[key] = null;
+          }
+          (el as any)[`__polyx_evt_${eventName}`] = null;
+        }
+      });
+    });
+
+    // Legacy cleanup
     this._dynamicElements.forEach((elements, key) => {
       if (key.startsWith('event-')) {
         const eventName = key.split('-')[1];

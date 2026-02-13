@@ -44,7 +44,7 @@ function Button() {
   return <button onClick={() => setCount(c => c + 1)}>Click</button>;
 }`;
     const result = compile(code);
-    expect(result.code).toContain('data-event-click');
+    expect(result.code).toContain('data-px-el');
     expect(result.code).toContain('_setDynamicEvent');
   });
 
@@ -55,7 +55,7 @@ function Toggle() {
   return <input type="checkbox" checked={on} />;
 }`;
     const result = compile(code);
-    expect(result.code).toContain('data-attr-checked');
+    expect(result.code).toContain('data-px-el');
     expect(result.code).toContain('_setDynamicAttribute');
   });
 
@@ -213,7 +213,7 @@ function App() {
     const result = compile(code);
     expect(result.code).toContain('_setDynamicProp');
     expect(result.code).toContain('"count"');
-    expect(result.code).toContain('data-child-idx');
+    expect(result.code).toContain('data-px-el');
   });
 
   it('should generate _createChild for component with props in expression', () => {
@@ -248,7 +248,7 @@ function App() {
 }`;
     const result = compile(code);
     expect(result.code).toContain('polyx-card');
-    expect(result.code).toContain('data-child-idx');
+    expect(result.code).toContain('data-px-el');
     // Children HTML should be inside the component tag in template
     expect(result.code).toContain('<p>hello</p>');
   });
@@ -311,7 +311,7 @@ function Input() {
   return <input {...props} />;
 }`;
     const result = compile(code);
-    expect(result.code).toContain('data-spread=');
+    expect(result.code).toContain('data-px-el=');
     expect(result.code).toContain('_setDynamicSpread');
   });
 
@@ -322,10 +322,10 @@ function Button() {
   return <button className="btn" {...rest} onClick={handler}>Click</button>;
 }`;
     const result = compile(code);
-    expect(result.code).toContain('data-spread=');
+    expect(result.code).toContain('data-px-el=');
     expect(result.code).toContain('_setDynamicSpread');
     expect(result.code).toContain('class=\\"btn\\"');
-    expect(result.code).toContain('data-event-click');
+    expect(result.code).toContain('_setDynamicEvent');
   });
 
   // Fragment fix tests

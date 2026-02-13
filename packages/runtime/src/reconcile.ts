@@ -5,34 +5,33 @@ export interface KeyedItem {
   node: Node;
 }
 
-// Find LIS indices for move optimization
+// Find LIS indices for move optimization — O(n log n) using patience sorting
 function longestIncreasingSubsequence(arr: number[]): number[] {
   const n = arr.length;
   if (n === 0) return [];
 
-  const dp = new Array(n).fill(1);
-  const prev = new Array(n).fill(-1);
-  let maxLen = 1;
-  let maxIdx = 0;
+  // tails[i] holds the index in arr of the smallest tail element for LIS of length i+1
+  const tails: number[] = [];
+  const prev: number[] = new Array(n).fill(-1);
 
-  for (let i = 1; i < n; i++) {
-    for (let j = 0; j < i; j++) {
-      if (arr[j] < arr[i] && dp[j] + 1 > dp[i]) {
-        dp[i] = dp[j] + 1;
-        prev[i] = j;
-      }
+  for (let i = 0; i < n; i++) {
+    // Binary search for insertion point in tails
+    let lo = 0, hi = tails.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (arr[tails[mid]] < arr[i]) lo = mid + 1;
+      else hi = mid;
     }
-    if (dp[i] > maxLen) {
-      maxLen = dp[i];
-      maxIdx = i;
-    }
+    if (lo > 0) prev[i] = tails[lo - 1];
+    tails[lo] = i;
   }
 
+  // Backtrack to reconstruct LIS
   const result: number[] = [];
-  let idx = maxIdx;
-  while (idx !== -1) {
-    result.push(idx);
-    idx = prev[idx];
+  let k = tails[tails.length - 1];
+  for (let i = tails.length - 1; i >= 0; i--) {
+    result.push(k);
+    k = prev[k];
   }
   return result.reverse();
 }
@@ -122,18 +121,25 @@ export function reconcileChildren(
   });
 }
 
-// Non-keyed reconciliation — simple approach
+// Non-keyed reconciliation — simple approach with value comparison
 export function reconcileNonKeyed(
   parentNode: Node,
   marker: Node,
   oldNodes: Node[],
   newValues: any[],
+  oldValues: any[],
   createElement: (value: any) => Node
 ): Node[] {
   const newNodes: Node[] = [];
 
   for (let i = 0; i < newValues.length; i++) {
     if (i < oldNodes.length) {
+      // Skip if value unchanged (reference equality)
+      if (i < oldValues.length && oldValues[i] === newValues[i]) {
+        newNodes.push(oldNodes[i]);
+        continue;
+      }
+
       // Reuse existing node if same type
       const oldNode = oldNodes[i];
       const newNode = createElement(newValues[i]);

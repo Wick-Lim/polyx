@@ -253,12 +253,11 @@ function transformComponent(
   const dynamicEvents: { elementIdx: number; event: string; handler: t.Expression }[] = [];
   const dynamicChildProps: { childIdx: number; name: string; expr: t.Expression }[] = [];
   const dynamicSpreads: DynamicSpread[] = [];
-  let elementCounter = 0;
-  let childCounter = 0;
+  let markerCounter = 0;
 
   const jsxNode = returnStatement.argument;
   if (t.isJSXElement(jsxNode) || t.isJSXFragment(jsxNode)) {
-    templateHTML = jsxToTemplate(jsxNode, dynamicValues, dynamicAttrs, dynamicEvents, dynamicChildProps, dynamicSpreads, () => elementCounter++, () => childCounter++);
+    templateHTML = jsxToTemplate(jsxNode, dynamicValues, dynamicAttrs, dynamicEvents, dynamicChildProps, dynamicSpreads, () => markerCounter++, () => markerCounter++);
   }
 
   // Scoped CSS processing
@@ -940,7 +939,7 @@ function processComponentElement(
   getElementIdx: () => number
 ): string {
   const childIdx = getChildIdx();
-  const staticAttrs: string[] = [`data-child-idx="${childIdx}"`];
+  const staticAttrs: string[] = [`data-px-el="${childIdx}"`];
 
   for (const attr of node.openingElement.attributes) {
     if (t.isJSXAttribute(attr)) {
@@ -1045,6 +1044,7 @@ function processAttributes(
   dynamicSpreads?: DynamicSpread[]
 ): string {
   const attrs: string[] = [];
+  let hasDynamic = false;
 
   for (const attr of attributes) {
     if (t.isJSXAttribute(attr)) {
@@ -1061,19 +1061,22 @@ function processAttributes(
         if (name.startsWith('on')) {
           const eventName = name.slice(2).toLowerCase();
           dynamicEvents.push({ elementIdx, event: eventName, handler: expr as t.Expression });
-          attrs.push(`data-event-${eventName}="${elementIdx}"`);
         } else {
           dynamicAttrs.push({ elementIdx, name, expr: expr as t.Expression });
-          attrs.push(`data-attr-${name}="${elementIdx}"`);
         }
+        hasDynamic = true;
       }
     } else if (t.isJSXSpreadAttribute(attr)) {
-      // {...props} spread — mark for runtime application
       if (dynamicSpreads) {
         dynamicSpreads.push({ elementIdx, expr: attr.argument });
       }
-      attrs.push(`data-spread="${elementIdx}"`);
+      hasDynamic = true;
     }
+  }
+
+  // Emit single unified marker when any dynamic bindings exist
+  if (hasDynamic) {
+    attrs.push(`data-px-el="${elementIdx}"`);
   }
 
   return attrs.length > 0 ? ' ' + attrs.join(' ') : '';

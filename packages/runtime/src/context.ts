@@ -64,13 +64,22 @@ export function createContext<T>(defaultValue: T): PolyXContext<T> {
   };
 }
 
-// useContext hook — traverses DOM tree to find nearest Provider
+// useContext hook — traverses DOM tree to find nearest Provider (cached after first call)
 export function useContext<T>(context: PolyXContext<T>): T {
   const instance = assertCurrentInstance();
   const index = getNextHookIndex();
-  const element = instance.element;
 
-  // Find the nearest provider by walking up the DOM
+  // On subsequent calls, read cached provider directly (no DOM traversal)
+  if (instance.hooks.length > index) {
+    const hook = instance.hooks[index];
+    if (hook && hook.provider) {
+      return hook.provider.value;
+    }
+    return context._defaultValue;
+  }
+
+  // First call: walk DOM to find provider
+  const element = instance.element;
   let provider: any = null;
   let node: Node | null = element;
   while (node) {
@@ -82,24 +91,18 @@ export function useContext<T>(context: PolyXContext<T>): T {
   }
 
   if (!provider) {
-    // No provider found — store placeholder hook and return default
-    if (instance.hooks.length <= index) {
-      instance.hooks.push({ provider: null, unsubscribe: null });
-    }
+    instance.hooks.push({ provider: null, unsubscribe: null });
     return context._defaultValue;
   }
 
-  // On first call, subscribe for updates
-  if (instance.hooks.length <= index) {
-    const unsubscribe = provider.subscribe(() => {
-      instance.render();
-    });
-    instance.hooks.push({
-      provider,
-      unsubscribe,
-      cleanup: unsubscribe,
-    });
-  }
+  const unsubscribe = provider.subscribe(() => {
+    instance.render();
+  });
+  instance.hooks.push({
+    provider,
+    unsubscribe,
+    cleanup: unsubscribe,
+  });
 
   return provider.value;
 }
