@@ -154,10 +154,13 @@ export function reconcileNonKeyed(
         newNodes.push(newNode);
       }
     } else {
-      // Add new node
+      // Add new node — insert after the last placed node (or after marker if first)
       const newNode = createElement(newValues[i]);
       const parent = marker.parentNode!;
-      parent.insertBefore(newNode, marker.nextSibling || null);
+      const insertRef = newNodes.length > 0
+        ? newNodes[newNodes.length - 1].nextSibling
+        : marker.nextSibling;
+      parent.insertBefore(newNode, insertRef);
       newNodes.push(newNode);
     }
   }

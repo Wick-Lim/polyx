@@ -1,0 +1,9 @@
+import './contexts.js';
+import './components/App.jsx';
+import './components/Header.jsx';
+import './components/UserBadge.jsx';
+import './components/Sidebar.jsx';
+import './components/NavItem.jsx';
+import './components/SettingsPanel.jsx';
+import './components/SettingRow.jsx';
+import './components/Badge.jsx';
