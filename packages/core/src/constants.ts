@@ -9,6 +9,8 @@ export const HOOK_TYPES = {
   CALLBACK: 'callback',
   REF: 'ref',
   CONTEXT: 'context',
+  TRANSITION: 'transition',
+  DEFERRED_VALUE: 'deferred_value',
 } as const;
 
 export const JSX_PRAGMA = {

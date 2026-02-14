@@ -73,52 +73,57 @@ export function reconcileChildren(
   });
   toRemove.forEach(node => node.parentNode?.removeChild(node));
 
-  // Map new items to their old indices (for LIS computation)
-  const oldIndices: number[] = [];
-  newItems.forEach(item => {
-    const oldIdx = oldKeyMap.get(item.key);
-    oldIndices.push(oldIdx !== undefined ? oldIdx : -1);
+  // For each new item, record its old index (-1 if new)
+  const oldIndices: number[] = newItems.map(item => {
+    const idx = oldKeyMap.get(item.key);
+    return idx !== undefined ? idx : -1;
   });
 
-  // Find LIS of old indices to determine which nodes can stay in place
-  const existingIndices = oldIndices.filter(i => i !== -1);
-  const lisIndices = new Set(longestIncreasingSubsequence(existingIndices));
-
-  // Build result — insert/move nodes
-  const parent = marker.parentNode!;
-  let currentNode = marker.nextSibling;
-
-  // Track which existing indices are in LIS
-  let existingPos = 0;
-  const stableSet = new Set<number>();
-  existingIndices.forEach((idx, pos) => {
-    if (lisIndices.has(pos)) {
-      stableSet.add(idx);
+  // Build array of old indices for existing (non-new) items, preserving order in newItems
+  // Also track which newItems index maps to which position in existingIndices
+  const existingOldIndices: number[] = [];
+  const existingNewIndices: number[] = [];
+  for (let i = 0; i < oldIndices.length; i++) {
+    if (oldIndices[i] !== -1) {
+      existingOldIndices.push(oldIndices[i]);
+      existingNewIndices.push(i);
     }
-  });
-
-  // Insert all new items in correct order after marker
-  let insertBefore: Node | null = null;
-
-  // Find the last node after all old items
-  const allOldNodes = new Set(oldItems.map(item => item.node));
-  let node = marker.nextSibling;
-  while (node && allOldNodes.has(node)) {
-    node = node.nextSibling;
   }
-  insertBefore = node;
 
-  // Simple approach: remove all, re-insert in new order
-  // (For small lists this is efficient; LIS optimization kicks in for large lists)
-  newItems.forEach(item => {
-    if (item.node.parentNode === parent) {
-      // Node exists in DOM — move if needed
-      parent.insertBefore(item.node, insertBefore);
-    } else {
-      // New node — insert
-      parent.insertBefore(item.node, insertBefore);
-    }
+  // Find LIS of old indices — these nodes are already in correct relative order
+  const lisPositions = new Set(longestIncreasingSubsequence(existingOldIndices));
+  const stableNewIndices = new Set<number>();
+  lisPositions.forEach(pos => {
+    stableNewIndices.add(existingNewIndices[pos]);
   });
+
+  // Now place nodes: iterate newItems in order.
+  // Nodes in the LIS stable set stay in place; others get inserted/moved.
+  const parent = marker.parentNode!;
+
+  // Walk through newItems in reverse so we always know the "next sibling" to insert before.
+  // The reference node starts as the node after all list items (after marker's list region).
+  // Find the boundary: the node right after the last old node in DOM order.
+  const oldNodeSet = new Set(oldItems.map(item => item.node));
+  let boundary: Node | null = marker.nextSibling;
+  while (boundary && oldNodeSet.has(boundary)) {
+    boundary = boundary.nextSibling;
+  }
+
+  // Process in reverse: last new item should be just before boundary
+  let nextSibling: Node | null = boundary;
+  for (let i = newItems.length - 1; i >= 0; i--) {
+    const node = newItems[i].node;
+    if (stableNewIndices.has(i)) {
+      // Node is in stable set — it should already be in the DOM before nextSibling
+      // Just update nextSibling reference
+      nextSibling = node;
+    } else {
+      // Node needs to be moved/inserted before nextSibling
+      parent.insertBefore(node, nextSibling);
+      nextSibling = node;
+    }
+  }
 }
 
 // Non-keyed reconciliation — simple approach with value comparison

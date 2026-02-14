@@ -1,7 +1,11 @@
 import type { ComponentInstance, HookEffect, Props } from '@polyx/core';
 import { setCurrentInstance } from './hooks-internals.js';
-import { reconcileNonKeyed } from './reconcile.js';
+import { depsChanged } from './hooks.js';
+import { reconcileChildren, reconcileNonKeyed } from './reconcile.js';
+import type { KeyedItem } from './reconcile.js';
+import { isTransition, scheduleTransition } from './scheduler.js';
 import { getHMR } from './hmr.js';
+import { isSuspensePromise, findSuspenseBoundary } from './suspense.js';
 
 export type RenderFn = (instance: any) => void;
 
@@ -40,6 +44,10 @@ export abstract class PolyXElement extends HTMLElement {
   // Array children tracking for list reconciliation
   private _arrayChildren: Map<number, Node[]> = new Map();
   private _arrayValues: Map<number, any[]> = new Map();
+  // Keyed list reconciliation tracking
+  private _keyedChildren: Map<number, KeyedItem[]> = new Map();
+  // Targeted effects pending from _renderState_* methods
+  private _pendingTargetedEffects: { hookIndex: number; isLayout: boolean }[] = [];
 
   constructor() {
     super();
@@ -134,6 +142,92 @@ export abstract class PolyXElement extends HTMLElement {
     }
   }
 
+  // Re-execute useMemo/useCallback at a specific hook index (deps-checked)
+  protected _execMemo(hookIndex: number, factory: () => any, deps: any[]): any {
+    const hook = this._instance.hooks[hookIndex];
+    if (hook && !depsChanged(hook.deps, deps)) {
+      return hook.value;
+    }
+    const value = factory();
+    this._instance.hooks[hookIndex] = { value, deps };
+    return value;
+  }
+
+  // Read a hook's cached value without re-execution
+  protected _readHook(hookIndex: number): any {
+    const hook = this._instance.hooks[hookIndex];
+    if (hook && typeof hook === 'object') {
+      // useMemo/useCallback: { value, deps }
+      if ('deps' in hook && 'value' in hook) return hook.value;
+      // useContext: { provider, unsubscribe, ... }
+      if ('provider' in hook) {
+        return hook.provider ? hook.provider.value : undefined;
+      }
+    }
+    // useRef: { current: ... } — return the object itself
+    // Or primitive hooks
+    return hook;
+  }
+
+  // Queue an effect for targeted execution (deps-checked)
+  protected _queueEffect(hookIndex: number, callback: Function, deps: any[] | undefined): void {
+    const prevHook = this._instance.hooks[hookIndex];
+    if (prevHook && deps !== undefined && !depsChanged(prevHook.deps, deps)) {
+      return; // deps unchanged, skip
+    }
+    this._instance.hooks[hookIndex] = {
+      callback,
+      deps,
+      cleanup: prevHook?.cleanup,
+    };
+    this._pendingTargetedEffects.push({ hookIndex, isLayout: false });
+  }
+
+  // Queue a layout effect for targeted execution (deps-checked)
+  protected _queueLayoutEffect(hookIndex: number, callback: Function, deps: any[] | undefined): void {
+    const prevHook = this._instance.hooks[hookIndex];
+    if (prevHook && deps !== undefined && !depsChanged(prevHook.deps, deps)) {
+      return;
+    }
+    this._instance.hooks[hookIndex] = {
+      callback,
+      deps,
+      cleanup: prevHook?.cleanup,
+    };
+    this._pendingTargetedEffects.push({ hookIndex, isLayout: true });
+  }
+
+  // Flush targeted effects: run layout effects synchronously, schedule regular effects
+  protected _flushTargetedEffects(): void {
+    const effects = this._pendingTargetedEffects;
+    if (effects.length === 0) return;
+    this._pendingTargetedEffects = [];
+
+    // Run layout effects synchronously
+    for (const eff of effects) {
+      if (eff.isLayout) {
+        const hook = this._instance.hooks[eff.hookIndex];
+        if (hook.cleanup) hook.cleanup();
+        const cleanup = hook.callback();
+        hook.cleanup = typeof cleanup === 'function' ? cleanup : undefined;
+      }
+    }
+
+    // Queue regular effects via microtask
+    const regularEffects = effects.filter(e => !e.isLayout);
+    if (regularEffects.length > 0) {
+      queueMicrotask(() => {
+        if (!this._isConnected) return;
+        for (const eff of regularEffects) {
+          const hook = this._instance.hooks[eff.hookIndex];
+          if (hook.cleanup) hook.cleanup();
+          const cleanup = hook.callback();
+          hook.cleanup = typeof cleanup === 'function' ? cleanup : undefined;
+        }
+      });
+    }
+  }
+
   // Track pending targeted state keys for batching
   private _pendingStateKeys: Set<string> | null = null;
 
@@ -150,6 +244,7 @@ export abstract class PolyXElement extends HTMLElement {
         this._pendingStateKeys = null;
         if (keys && keys.size > 0) {
           for (const k of keys) {
+            if (this._pendingUpdate) break; // full update supersedes targeted
             const h = (this as any)[`_renderState_${k}`];
             if (h) h.call(this);
           }
@@ -164,12 +259,24 @@ export abstract class PolyXElement extends HTMLElement {
     this._pendingUpdate = true;
     // Cancel any pending targeted updates — full update supersedes them
     this._pendingStateKeys = null;
-    queueMicrotask(() => {
-      this._pendingUpdate = false;
-      if (this._isConnected) {
-        this._updateDynamicParts();
-      }
-    });
+
+    if (isTransition()) {
+      // Low priority: defer to requestAnimationFrame
+      scheduleTransition(() => {
+        this._pendingUpdate = false;
+        if (this._isConnected) {
+          this._updateDynamicParts();
+        }
+      });
+    } else {
+      // High priority: immediate microtask (default behavior)
+      queueMicrotask(() => {
+        this._pendingUpdate = false;
+        if (this._isConnected) {
+          this._updateDynamicParts();
+        }
+      });
+    }
   }
 
   protected _updateDynamicParts() {
@@ -184,8 +291,17 @@ export abstract class PolyXElement extends HTMLElement {
       if (this._instance.effects.length > 0) {
         queueMicrotask(() => this._runEffects());
       }
-    } catch (error) {
-      console.error('Update error:', error);
+    } catch (thrown) {
+      if (isSuspensePromise(thrown)) {
+        const boundary = findSuspenseBoundary(this);
+        if (boundary) {
+          boundary._handleSuspend(thrown as Promise<any>, this);
+        } else {
+          console.error('No <Suspense> boundary found for', this.tagName);
+        }
+      } else {
+        console.error('Update error:', thrown);
+      }
     } finally {
       setCurrentInstance(null);
     }
@@ -292,6 +408,43 @@ export abstract class PolyXElement extends HTMLElement {
       }
     }
     return el;
+  }
+
+  // Keyed list reconciliation: reuse existing elements by key, minimal DOM moves via LIS
+  protected _setKeyedList(
+    index: number,
+    descriptors: { key: string | number; tag: string; props: Record<string, any> }[]
+  ): void {
+    const marker = this._valueMarkers[index];
+    if (!marker) return;
+
+    const oldKeyed = this._keyedChildren.get(index) || [];
+    const oldKeyMap = new Map<string | number, KeyedItem>();
+    for (const item of oldKeyed) oldKeyMap.set(item.key, item);
+
+    const newKeyed: KeyedItem[] = descriptors.map(desc => {
+      const existing = oldKeyMap.get(desc.key);
+      if (existing) {
+        // REUSE: update props only (no DOM recreation)
+        if ('_setProps' in (existing.node as any)) {
+          (existing.node as any)._setProps(desc.props);
+        }
+        oldKeyMap.delete(desc.key);
+        return { key: desc.key, node: existing.node };
+      } else {
+        // CREATE: new element
+        return { key: desc.key, node: this._createChild(desc.tag, desc.props) };
+      }
+    });
+
+    // Remove old items not in new list
+    for (const [, item] of oldKeyMap) {
+      item.node.parentNode?.removeChild(item.node);
+    }
+
+    // LIS-based minimal DOM moves
+    reconcileChildren(marker.parentNode!, marker, oldKeyed, newKeyed);
+    this._keyedChildren.set(index, newKeyed);
   }
 
   protected _setDynamicAttribute(index: number, attrName: string, value: any) {

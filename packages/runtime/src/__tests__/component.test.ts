@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { PolyXElement, createTemplate, clearTemplateCache } from '../component.js';
 import { setCurrentInstance } from '../hooks-internals.js';
+import { startTransition } from '../scheduler.js';
 
 beforeEach(() => {
   clearTemplateCache();
@@ -330,6 +331,184 @@ describe('PolyXElement', () => {
 
     const child = el.querySelector('polyx-child');
     expect(child).not.toBeNull();
+    document.body.removeChild(el);
+  });
+});
+
+describe('_setKeyedList', () => {
+  let tagCounter2 = 100;
+
+  // Define a simple child component for keyed list tests
+  function defineChildComponent(name?: string): string {
+    const tagName = name || `test-child-${++tagCounter2}`;
+    try {
+      class ChildEl extends PolyXElement {
+        static template = createTemplate('<div><span data-dyn="0"></span></div>');
+        _render() {
+          this._setDynamicValue(0, (this as any)._props.name || '');
+        }
+      }
+      customElements.define(tagName, ChildEl);
+    } catch (e) {
+      // Already defined
+    }
+    return tagName;
+  }
+
+  function defineKeyedParent(
+    childTag: string,
+    renderFn: (el: any) => void,
+    name?: string
+  ): string {
+    const tagName = name || `test-keyed-${++tagCounter2}`;
+    class ParentEl extends PolyXElement {
+      static template = createTemplate('<div><span data-dyn="0"></span></div>');
+      _render() {
+        renderFn(this);
+      }
+    }
+    customElements.define(tagName, ParentEl);
+    return tagName;
+  }
+
+  it('should create elements on first render', async () => {
+    const childTag = defineChildComponent();
+    const tagName = defineKeyedParent(childTag, (el) => {
+      el._setKeyedList(0, [
+        { key: 1, tag: childTag, props: { name: 'Alice' } },
+        { key: 2, tag: childTag, props: { name: 'Bob' } },
+      ]);
+    });
+
+    const el = document.createElement(tagName);
+    document.body.appendChild(el);
+    await new Promise(r => queueMicrotask(r));
+
+    const children = el.querySelectorAll(childTag);
+    expect(children.length).toBe(2);
+    document.body.removeChild(el);
+  });
+
+  it('should reuse elements by key on re-render', async () => {
+    const childTag = defineChildComponent();
+    let items = [
+      { key: 1, tag: childTag, props: { name: 'Alice' } },
+      { key: 2, tag: childTag, props: { name: 'Bob' } },
+    ];
+
+    const tagName = defineKeyedParent(childTag, (el) => {
+      el._setKeyedList(0, items);
+    });
+
+    const el = document.createElement(tagName) as any;
+    document.body.appendChild(el);
+    await new Promise(r => queueMicrotask(r));
+
+    const firstChild = el.querySelectorAll(childTag)[0];
+
+    // Reorder items (swap)
+    items = [
+      { key: 2, tag: childTag, props: { name: 'Bob' } },
+      { key: 1, tag: childTag, props: { name: 'Alice' } },
+    ];
+    el._updateDynamicParts();
+    await new Promise(r => queueMicrotask(r));
+
+    const children = el.querySelectorAll(childTag);
+    expect(children.length).toBe(2);
+    // The element with key=1 should be reused (same DOM node)
+    expect(children[1]).toBe(firstChild);
+    document.body.removeChild(el);
+  });
+
+  it('should remove elements not in new list', async () => {
+    const childTag = defineChildComponent();
+    let items = [
+      { key: 1, tag: childTag, props: { name: 'Alice' } },
+      { key: 2, tag: childTag, props: { name: 'Bob' } },
+      { key: 3, tag: childTag, props: { name: 'Carol' } },
+    ];
+
+    const tagName = defineKeyedParent(childTag, (el) => {
+      el._setKeyedList(0, items);
+    });
+
+    const el = document.createElement(tagName) as any;
+    document.body.appendChild(el);
+    await new Promise(r => queueMicrotask(r));
+    expect(el.querySelectorAll(childTag).length).toBe(3);
+
+    // Remove middle item
+    items = [
+      { key: 1, tag: childTag, props: { name: 'Alice' } },
+      { key: 3, tag: childTag, props: { name: 'Carol' } },
+    ];
+    el._updateDynamicParts();
+    await new Promise(r => queueMicrotask(r));
+
+    expect(el.querySelectorAll(childTag).length).toBe(2);
+    document.body.removeChild(el);
+  });
+
+  it('should handle empty list', async () => {
+    const childTag = defineChildComponent();
+    let items: any[] = [
+      { key: 1, tag: childTag, props: { name: 'Alice' } },
+    ];
+
+    const tagName = defineKeyedParent(childTag, (el) => {
+      el._setKeyedList(0, items);
+    });
+
+    const el = document.createElement(tagName) as any;
+    document.body.appendChild(el);
+    await new Promise(r => queueMicrotask(r));
+    expect(el.querySelectorAll(childTag).length).toBe(1);
+
+    // Empty list
+    items = [];
+    el._updateDynamicParts();
+    await new Promise(r => queueMicrotask(r));
+    expect(el.querySelectorAll(childTag).length).toBe(0);
+
+    document.body.removeChild(el);
+  });
+});
+
+describe('startTransition', () => {
+  let tagCounter3 = 200;
+
+  it('should defer update when called inside startTransition', async () => {
+    const tagName = `test-transition-${++tagCounter3}`;
+    let renderCount = 0;
+
+    class TransEl extends PolyXElement {
+      static template = createTemplate('<div><span data-dyn="0"></span></div>');
+      _render() {
+        renderCount++;
+        this._setDynamicValue(0, `count: ${this._state.count || 0}`);
+      }
+    }
+    customElements.define(tagName, TransEl);
+
+    const el = document.createElement(tagName) as any;
+    document.body.appendChild(el);
+    const initialRenders = renderCount;
+
+    // Normal (sync) update
+    el._updateState('count', 1);
+    await new Promise(r => queueMicrotask(r));
+    expect(renderCount).toBe(initialRenders + 1);
+
+    // Transition update — should NOT fire on microtask
+    const preTransitionRenders = renderCount;
+    startTransition(() => {
+      el._updateState('count', 2);
+    });
+    await new Promise(r => queueMicrotask(r));
+    // Should NOT have rendered yet (transition goes to RAF, not microtask)
+    expect(renderCount).toBe(preTransitionRenders);
+
     document.body.removeChild(el);
   });
 });

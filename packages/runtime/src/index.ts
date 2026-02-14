@@ -13,6 +13,12 @@ export { initHMR, getHMR } from './hmr.js';
 // Hydration support
 export { hydrate, isHydrating } from './hydrate.js';
 
+// Priority scheduling
+export { startTransition } from './scheduler.js';
+
+// Suspense + lazy
+export { lazy, PolyXSuspense } from './suspense.js';
+
 // Keep hooks exports
 export {
   useState,
@@ -21,4 +27,6 @@ export {
   useRef,
   useMemo,
   useCallback,
+  useTransition,
+  useDeferredValue,
 } from './hooks.js';

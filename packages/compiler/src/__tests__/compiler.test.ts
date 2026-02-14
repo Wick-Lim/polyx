@@ -440,4 +440,67 @@ function Toggle() {
     expect(handlerCode).toContain('_setDynamicValue');
     expect(handlerCode).toContain('_setDynamicAttribute');
   });
+
+  // Keyed List Reconciliation tests
+  it('should generate _setKeyedList for map with key prop (arrow expression body)', () => {
+    const code = `
+function List({ items }) {
+  const [x, setX] = useState(0);
+  return <div>{items.map(item => <Item key={item.id} name={item.name} />)}</div>;
+}`;
+    const result = compile(code);
+    expect(result.code).toContain('_setKeyedList');
+    expect(result.code).not.toContain('_createChild');
+    expect(result.code).toContain('"polyx-item"');
+    expect(result.code).toContain('key:');
+    expect(result.code).toContain('tag:');
+    expect(result.code).toContain('props:');
+  });
+
+  it('should generate _setKeyedList for map with key prop (block body)', () => {
+    const code = `
+function List({ items }) {
+  const [x, setX] = useState(0);
+  return <div>{items.map(item => {
+    return <Row key={item.id} value={item.value} />;
+  })}</div>;
+}`;
+    const result = compile(code);
+    expect(result.code).toContain('_setKeyedList');
+    expect(result.code).toContain('"polyx-row"');
+  });
+
+  it('should use _setDynamicValue for map without key prop', () => {
+    const code = `
+function List({ items }) {
+  const [x, setX] = useState(0);
+  return <div>{items.map(item => <Item name={item.name} />)}</div>;
+}`;
+    const result = compile(code);
+    expect(result.code).toContain('_setDynamicValue');
+    expect(result.code).toContain('_createChild');
+    expect(result.code).not.toContain('_setKeyedList');
+  });
+
+  it('should use _setDynamicValue for non-map expressions', () => {
+    const code = `
+function App() {
+  const [show, setShow] = useState(true);
+  return <div>{show && <Counter count={5} />}</div>;
+}`;
+    const result = compile(code);
+    expect(result.code).toContain('_setDynamicValue');
+    expect(result.code).not.toContain('_setKeyedList');
+  });
+
+  it('should handle string key in keyed list', () => {
+    const code = `
+function List({ items }) {
+  const [x, setX] = useState(0);
+  return <div>{items.map(item => <Item key="static-key" name={item.name} />)}</div>;
+}`;
+    const result = compile(code);
+    expect(result.code).toContain('_setKeyedList');
+    expect(result.code).toContain('"static-key"');
+  });
 });

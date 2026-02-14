@@ -51,6 +51,37 @@ export function compile(code: string, options: CompilerOptions = {}): TransformR
     },
   });
 
+  // Detect lazy() calls and auto-register custom elements
+  const lazyRegistrations: { name: string; path: NodePath<t.VariableDeclarator> }[] = [];
+  traverse(ast, {
+    VariableDeclarator(path: NodePath<t.VariableDeclarator>) {
+      if (t.isIdentifier(path.node.id)) {
+        const name = path.node.id.name;
+        if (/^[A-Z]/.test(name)) {
+          const init = path.node.init;
+          if (t.isCallExpression(init) && t.isIdentifier(init.callee) && init.callee.name === 'lazy') {
+            lazyRegistrations.push({ name, path });
+          }
+        }
+      }
+    },
+  });
+
+  // Insert customElements.define for lazy components
+  lazyRegistrations.forEach(({ name, path: lazyPath }) => {
+    const tagName = `polyx-${name.toLowerCase()}`;
+    const registration = t.expressionStatement(
+      t.callExpression(
+        t.memberExpression(t.identifier('customElements'), t.identifier('define')),
+        [t.stringLiteral(tagName), t.identifier(name)]
+      )
+    );
+    const parent = lazyPath.parentPath;
+    if (parent && parent.isVariableDeclaration()) {
+      parent.insertAfter(registration);
+    }
+  });
+
   if (!hasJSX || components.length === 0) {
     return { code };
   }
@@ -274,7 +305,16 @@ function transformComponent(
     templateHTML = templateHTML.replace(/^(<[a-zA-Z][a-zA-Z0-9-]*)/, `$1 ${scopeAttr}`);
   }
 
+  // Pre-pass: detect keyed map expressions (e.g. items.map(item => <Comp key={item.id} .../>))
+  const keyedSlots = new Set<number>();
+  dynamicValues.forEach(dv => {
+    if (tryTransformKeyedMap(dv.expr)) {
+      keyedSlots.add(dv.slotIdx);
+    }
+  });
+
   // Transform JSX expressions in dynamic values (e.g. {show && <Counter count={5} />})
+  // This also handles any remaining JSX inside keyed map prop values
   dynamicValues.forEach(dv => {
     const exprAST = t.file(t.program([t.expressionStatement(dv.expr)], [], 'module'));
     transformJSXInExpressions(exprAST);
@@ -333,11 +373,13 @@ function transformComponent(
   const renderBodyStatements: t.Statement[] = [
     ...transformedBody,
 
-    // Set dynamic values
+    // Set dynamic values (keyed lists use _setKeyedList, others use _setDynamicValue)
     ...dynamicValues.map(({ expr, slotIdx }) =>
       t.expressionStatement(
         t.callExpression(
-          t.memberExpression(t.thisExpression(), t.identifier('_setDynamicValue')),
+          t.memberExpression(t.thisExpression(), t.identifier(
+            keyedSlots.has(slotIdx) ? '_setKeyedList' : '_setDynamicValue'
+          )),
           [t.numericLiteral(slotIdx), expr]
         )
       )
@@ -388,26 +430,147 @@ function transformComponent(
     t.classMethod('method', t.identifier('_render'), [], t.blockStatement(renderBodyStatements))
   );
 
-  // 5. Fine-grained reactivity: per-state update methods
-  // Skip when component body uses hooks that create derived values (useMemo, useCallback, etc.)
-  // because _renderState_* methods can't re-execute those hooks
-  const derivedHookNames = new Set(['useMemo', 'useCallback', 'useEffect', 'useLayoutEffect', 'useRef', 'useContext']);
-  let hasDerivedHooks = false;
-  const bodyCheckAST = t.file(t.program(filteredBody, [], 'module'));
-  traverse(bodyCheckAST, {
-    CallExpression(checkPath: NodePath<t.CallExpression>) {
-      if (t.isIdentifier(checkPath.node.callee) && derivedHookNames.has(checkPath.node.callee.name)) {
-        hasDerivedHooks = true;
-        checkPath.stop();
-      }
-    },
-    noScope: true
-  });
-
-  if (states.length > 0 && !hasDerivedHooks) {
+  // 5. Fine-grained reactivity: per-state update methods with hook dependency analysis
+  // Unlike old approach that skipped _renderState_* when derived hooks exist,
+  // we now build a hook dependency graph so _renderState_* can selectively
+  // re-execute only affected hooks (via _execMemo/_queueEffect) or read cache (_readHook).
+  if (states.length > 0) {
     const stateNames = new Set(states.map(s => s.name));
+    const hookTypeNames = new Set(['useMemo', 'useCallback', 'useEffect', 'useLayoutEffect', 'useRef', 'useContext']);
 
-    // Build per-state dependency map
+    // Step 1: Collect hook info from filteredBody
+    interface HookInfo {
+      index: number;
+      type: string;
+      varName: string | null;
+      factoryNode: t.Expression | null;
+      depsNode: t.ArrayExpression | null;
+      hasDeps: boolean;
+      stateDeps: Set<string>;
+      hookDeps: Set<string>;
+    }
+
+    const hookInfos: HookInfo[] = [];
+    let nextHookIndex = 0;
+
+    filteredBody.forEach(stmt => {
+      let callExpr: t.CallExpression | null = null;
+      let varName: string | null = null;
+
+      if (t.isVariableDeclaration(stmt)) {
+        const decl = stmt.declarations[0];
+        if (decl && t.isCallExpression(decl.init) && t.isIdentifier(decl.init.callee) && hookTypeNames.has(decl.init.callee.name)) {
+          callExpr = decl.init;
+          if (t.isIdentifier(decl.id)) varName = decl.id.name;
+        }
+      } else if (t.isExpressionStatement(stmt) && t.isCallExpression(stmt.expression) && t.isIdentifier(stmt.expression.callee) && hookTypeNames.has(stmt.expression.callee.name)) {
+        callExpr = stmt.expression;
+      }
+
+      if (!callExpr) return;
+
+      const hookName = (callExpr.callee as t.Identifier).name;
+      let factoryNode: t.Expression | null = null;
+      let depsNode: t.ArrayExpression | null = null;
+      let hasDeps = false;
+
+      if (hookName === 'useMemo' || hookName === 'useCallback' || hookName === 'useEffect' || hookName === 'useLayoutEffect') {
+        factoryNode = (callExpr.arguments[0] as t.Expression) || null;
+        if (callExpr.arguments.length > 1 && t.isArrayExpression(callExpr.arguments[1])) {
+          depsNode = callExpr.arguments[1] as t.ArrayExpression;
+          hasDeps = true;
+        }
+      }
+
+      hookInfos.push({
+        index: nextHookIndex++,
+        type: hookName,
+        varName,
+        factoryNode,
+        depsNode,
+        hasDeps,
+        stateDeps: new Set(),
+        hookDeps: new Set(),
+      });
+    });
+
+    // Step 2: Build dependency graph
+    const derivedVarNames = new Map<string, number>(); // varName → hookIndex
+    hookInfos.forEach(h => {
+      if (h.varName) derivedVarNames.set(h.varName, h.index);
+    });
+
+    const allTrackableNames = new Set([...stateNames, ...derivedVarNames.keys()]);
+
+    hookInfos.forEach(h => {
+      if (h.depsNode) {
+        h.depsNode.elements.forEach(elem => {
+          if (elem && !t.isSpreadElement(elem)) {
+            const refs = findIdentifierRefs(elem as t.Expression, allTrackableNames);
+            refs.forEach(ref => {
+              if (stateNames.has(ref)) h.stateDeps.add(ref);
+              else if (derivedVarNames.has(ref)) h.hookDeps.add(ref);
+            });
+          }
+        });
+      }
+    });
+
+    // Step 3: Compute affected hooks per state (transitive closure)
+    function computeAffectedHooks(stateName: string): Set<number> {
+      const affected = new Set<number>();
+
+      // Direct state dependencies
+      hookInfos.forEach(h => {
+        if (h.stateDeps.has(stateName)) affected.add(h.index);
+      });
+
+      // Transitive closure through derived vars
+      let changed = true;
+      while (changed) {
+        changed = false;
+        hookInfos.forEach(h => {
+          if (affected.has(h.index)) return;
+          for (const depVarName of h.hookDeps) {
+            const depIdx = derivedVarNames.get(depVarName);
+            if (depIdx !== undefined && affected.has(depIdx)) {
+              affected.add(h.index);
+              changed = true;
+              break;
+            }
+          }
+        });
+      }
+
+      // Effects without deps arg → run every update
+      hookInfos.forEach(h => {
+        if ((h.type === 'useEffect' || h.type === 'useLayoutEffect') && !h.hasDeps) {
+          affected.add(h.index);
+        }
+      });
+
+      return affected;
+    }
+
+    const affectedHooksPerState = new Map<string, Set<number>>();
+    states.forEach(s => {
+      affectedHooksPerState.set(s.name, computeAffectedHooks(s.name));
+    });
+
+    // Step 4: Compute affected derived var names per state
+    const affectedDerivedPerState = new Map<string, Set<string>>();
+    states.forEach(s => {
+      const affected = affectedHooksPerState.get(s.name)!;
+      const derivedNames = new Set<string>();
+      hookInfos.forEach(h => {
+        if (affected.has(h.index) && h.varName) {
+          derivedNames.add(h.varName);
+        }
+      });
+      affectedDerivedPerState.set(s.name, derivedNames);
+    });
+
+    // Step 5: Build per-state DOM dependency map (extended with derived vars)
     const stateDepMap = new Map<string, {
       values: { slotIdx: number; expr: t.Expression }[];
       attrs: { elementIdx: number; name: string; expr: t.Expression }[];
@@ -416,45 +579,65 @@ function transformComponent(
       childProps: { childIdx: number; name: string; expr: t.Expression }[];
     }>();
 
-    // Initialize map entries
     for (const s of states) {
       stateDepMap.set(s.name, { values: [], attrs: [], events: [], spreads: [], childProps: [] });
     }
 
-    // Analyze dynamic values
+    // Check if an expression is affected by a state change (directly or via derived vars)
+    function exprAffectsState(expr: t.Expression, stateName: string): boolean {
+      const affectedDerived = affectedDerivedPerState.get(stateName)!;
+      const checkSet = new Set([stateName, ...affectedDerived]);
+      const refs = findIdentifierRefs(expr, checkSet);
+      return refs.size > 0;
+    }
+
     dynamicValues.forEach(dv => {
-      const deps = findIdentifierRefs(dv.expr, stateNames);
-      deps.forEach(dep => stateDepMap.get(dep)!.values.push({ slotIdx: dv.slotIdx, expr: dv.expr }));
+      states.forEach(s => {
+        if (exprAffectsState(dv.expr, s.name)) {
+          stateDepMap.get(s.name)!.values.push({ slotIdx: dv.slotIdx, expr: dv.expr });
+        }
+      });
     });
 
-    // Analyze dynamic attributes
     dynamicAttrs.forEach(da => {
-      const deps = findIdentifierRefs(da.expr, stateNames);
-      deps.forEach(dep => stateDepMap.get(dep)!.attrs.push(da));
+      states.forEach(s => {
+        if (exprAffectsState(da.expr, s.name)) {
+          stateDepMap.get(s.name)!.attrs.push(da);
+        }
+      });
     });
 
-    // Analyze dynamic events
     dynamicEvents.forEach(de => {
-      const deps = findIdentifierRefs(de.handler, stateNames);
-      deps.forEach(dep => stateDepMap.get(dep)!.events.push(de));
+      states.forEach(s => {
+        if (exprAffectsState(de.handler, s.name)) {
+          stateDepMap.get(s.name)!.events.push(de);
+        }
+      });
     });
 
-    // Analyze spreads
     dynamicSpreads.forEach(ds => {
-      const deps = findIdentifierRefs(ds.expr, stateNames);
-      deps.forEach(dep => stateDepMap.get(dep)!.spreads.push(ds));
+      states.forEach(s => {
+        if (exprAffectsState(ds.expr, s.name)) {
+          stateDepMap.get(s.name)!.spreads.push(ds);
+        }
+      });
     });
 
-    // Analyze child props
     dynamicChildProps.forEach(dp => {
-      const deps = findIdentifierRefs(dp.expr, stateNames);
-      deps.forEach(dep => stateDepMap.get(dep)!.childProps.push(dp));
+      states.forEach(s => {
+        if (exprAffectsState(dp.expr, s.name)) {
+          stateDepMap.get(s.name)!.childProps.push(dp);
+        }
+      });
     });
 
-    // Generate _renderState_{name}() for each state with dependencies
+    // Step 6: Generate _renderState_{name}() for each state
     stateDepMap.forEach((deps, stateName) => {
+      const affected = affectedHooksPerState.get(stateName)!;
       const totalDeps = deps.values.length + deps.attrs.length + deps.events.length + deps.spreads.length + deps.childProps.length;
-      if (totalDeps === 0) return;
+      const hasAffectedHooks = hookInfos.some(h => affected.has(h.index));
+
+      if (totalDeps === 0 && !hasAffectedHooks) return;
 
       const methodBody: t.Statement[] = [];
 
@@ -480,11 +663,106 @@ function transformComponent(
         methodBody.push(...propsBody);
       }
 
-      // Generate targeted _setDynamic* calls
+      // Process hooks in topological order (source order)
+      hookInfos.forEach(h => {
+        if (affected.has(h.index)) {
+          // Hook is affected → re-execute
+          switch (h.type) {
+            case 'useMemo': {
+              methodBody.push(
+                t.variableDeclaration('const', [
+                  t.variableDeclarator(
+                    t.identifier(h.varName!),
+                    t.callExpression(
+                      t.memberExpression(t.thisExpression(), t.identifier('_execMemo')),
+                      [t.numericLiteral(h.index), h.factoryNode!, h.depsNode || t.arrayExpression([])]
+                    )
+                  )
+                ])
+              );
+              break;
+            }
+            case 'useCallback': {
+              // useCallback(fn, deps) → _execMemo(idx, () => fn, deps)
+              methodBody.push(
+                t.variableDeclaration('const', [
+                  t.variableDeclarator(
+                    t.identifier(h.varName!),
+                    t.callExpression(
+                      t.memberExpression(t.thisExpression(), t.identifier('_execMemo')),
+                      [t.numericLiteral(h.index), t.arrowFunctionExpression([], h.factoryNode!), h.depsNode || t.arrayExpression([])]
+                    )
+                  )
+                ])
+              );
+              break;
+            }
+            case 'useEffect': {
+              methodBody.push(
+                t.expressionStatement(
+                  t.callExpression(
+                    t.memberExpression(t.thisExpression(), t.identifier('_queueEffect')),
+                    [t.numericLiteral(h.index), h.factoryNode!, h.hasDeps ? (h.depsNode || t.arrayExpression([])) : t.identifier('undefined')]
+                  )
+                )
+              );
+              break;
+            }
+            case 'useLayoutEffect': {
+              methodBody.push(
+                t.expressionStatement(
+                  t.callExpression(
+                    t.memberExpression(t.thisExpression(), t.identifier('_queueLayoutEffect')),
+                    [t.numericLiteral(h.index), h.factoryNode!, h.hasDeps ? (h.depsNode || t.arrayExpression([])) : t.identifier('undefined')]
+                  )
+                )
+              );
+              break;
+            }
+            case 'useRef':
+            case 'useContext': {
+              if (h.varName) {
+                methodBody.push(
+                  t.variableDeclaration('const', [
+                    t.variableDeclarator(
+                      t.identifier(h.varName),
+                      t.callExpression(
+                        t.memberExpression(t.thisExpression(), t.identifier('_readHook')),
+                        [t.numericLiteral(h.index)]
+                      )
+                    )
+                  ])
+                );
+              }
+              break;
+            }
+          }
+        } else {
+          // Hook NOT affected → read from cache if it produces a variable
+          if (h.varName) {
+            methodBody.push(
+              t.variableDeclaration('const', [
+                t.variableDeclarator(
+                  t.identifier(h.varName),
+                  t.callExpression(
+                    t.memberExpression(t.thisExpression(), t.identifier('_readHook')),
+                    [t.numericLiteral(h.index)]
+                  )
+                )
+              ])
+            );
+          }
+          // Effects not affected: skip
+        }
+      });
+
+      // Generate targeted DOM updates
       deps.values.forEach(({ slotIdx, expr }) => {
         methodBody.push(t.expressionStatement(
           t.callExpression(
-            t.memberExpression(t.thisExpression(), t.identifier('_setDynamicValue')),
+            t.memberExpression(t.thisExpression(), t.identifier(
+              keyedSlots.has(slotIdx) ? '_setKeyedList' : '_setDynamicValue'
+            )),
             [t.numericLiteral(slotIdx), expr]
           )
         ));
@@ -525,6 +803,18 @@ function transformComponent(
           )
         ));
       });
+
+      // Flush targeted effects if any hooks exist
+      if (hookInfos.length > 0) {
+        methodBody.push(
+          t.expressionStatement(
+            t.callExpression(
+              t.memberExpression(t.thisExpression(), t.identifier('_flushTargetedEffects')),
+              []
+            )
+          )
+        );
+      }
 
       classMembers.push(
         t.classMethod('method', t.identifier(`_renderState_${stateName}`), [], t.blockStatement(methodBody))
@@ -712,6 +1002,96 @@ function transformJSXInExpressions(ast: t.File): void {
       }
     }
   });
+}
+
+// Detect and transform keyed .map() expressions:
+// items.map(item => <Comp key={item.id} ...props />) → items.map(item => ({ key: item.id, tag: "polyx-comp", props: {...} }))
+// Returns true if transformation was applied (key prop found in map callback's JSX).
+function tryTransformKeyedMap(expr: t.Expression): boolean {
+  // Check pattern: something.map(callback)
+  if (!t.isCallExpression(expr)) return false;
+  if (!t.isMemberExpression(expr.callee)) return false;
+  if (!t.isIdentifier(expr.callee.property) || expr.callee.property.name !== 'map') return false;
+  if (expr.arguments.length < 1) return false;
+
+  const callback = expr.arguments[0];
+  if (!t.isArrowFunctionExpression(callback) && !t.isFunctionExpression(callback)) return false;
+
+  // Find the returned JSX element
+  let returnedJSX: t.JSXElement | null = null;
+  let returnStmt: t.ReturnStatement | null = null;
+
+  if (t.isArrowFunctionExpression(callback) && t.isJSXElement(callback.body)) {
+    returnedJSX = callback.body;
+  } else if (t.isBlockStatement((callback as any).body)) {
+    const body = ((callback as any).body as t.BlockStatement).body;
+    const lastStmt = body[body.length - 1];
+    if (t.isReturnStatement(lastStmt) && t.isJSXElement(lastStmt.argument)) {
+      returnedJSX = lastStmt.argument;
+      returnStmt = lastStmt;
+    }
+  }
+
+  if (!returnedJSX) return false;
+
+  // Must be a component element (capital first letter)
+  const rawName = t.isJSXIdentifier(returnedJSX.openingElement.name)
+    ? returnedJSX.openingElement.name.name : null;
+  if (!rawName || !isComponentTag(rawName)) return false;
+
+  const tagName = `polyx-${rawName.toLowerCase()}`;
+
+  // Extract key and other props
+  let keyExpr: t.Expression | null = null;
+  const propEntries: t.ObjectProperty[] = [];
+
+  for (const attr of returnedJSX.openingElement.attributes) {
+    if (t.isJSXAttribute(attr)) {
+      const name = t.isJSXIdentifier(attr.name) ? attr.name.name : (attr.name as any).name.name;
+
+      if (name === 'key') {
+        if (t.isJSXExpressionContainer(attr.value) && !t.isJSXEmptyExpression((attr.value as t.JSXExpressionContainer).expression)) {
+          keyExpr = (attr.value as t.JSXExpressionContainer).expression as t.Expression;
+        } else if (t.isStringLiteral(attr.value)) {
+          keyExpr = attr.value;
+        }
+        continue;
+      }
+      if (name === 'ref') continue;
+
+      let value: t.Expression;
+      if (!attr.value) {
+        value = t.booleanLiteral(true);
+      } else if (t.isStringLiteral(attr.value)) {
+        value = attr.value;
+      } else if (t.isJSXExpressionContainer(attr.value) && !t.isJSXEmptyExpression((attr.value as t.JSXExpressionContainer).expression)) {
+        value = (attr.value as t.JSXExpressionContainer).expression as t.Expression;
+      } else {
+        continue;
+      }
+      propEntries.push(t.objectProperty(t.identifier(name), value));
+    }
+  }
+
+  if (!keyExpr) return false; // No key found → not keyed
+
+  // Build descriptor: { key: keyExpr, tag: "polyx-tagname", props: { ...props } }
+  const descriptorExpr = t.objectExpression([
+    t.objectProperty(t.identifier('key'), keyExpr),
+    t.objectProperty(t.identifier('tag'), t.stringLiteral(tagName)),
+    t.objectProperty(t.identifier('props'), t.objectExpression(propEntries)),
+  ]);
+
+  // Replace callback body with descriptor
+  if (t.isArrowFunctionExpression(callback) && !t.isBlockStatement(callback.body)) {
+    // Arrow with expression body → replace directly
+    (callback as t.ArrowFunctionExpression).body = descriptorExpr;
+  } else if (returnStmt) {
+    // Block body → replace return argument
+    returnStmt.argument = descriptorExpr;
+  }
+
+  return true;
 }
 
 // Convert a JSX element to an expression:

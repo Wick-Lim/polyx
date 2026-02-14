@@ -34,6 +34,13 @@ export interface ComponentInstance {
 // Props Types
 export type Props = Record<string, any>;
 
+// Keyed List Descriptor (used by _setKeyedList for keyed reconciliation)
+export interface KeyedListDescriptor {
+  key: string | number;
+  tag: string;
+  props: Record<string, any>;
+}
+
 // Compiler Types
 export interface CompilerOptions {
   target?: 'es2020' | 'es2022';
