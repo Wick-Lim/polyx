@@ -11,7 +11,8 @@ export type { ErrorInfo } from './error-boundary.js';
 export { initHMR, getHMR } from './hmr.js';
 
 // Hydration support
-export { hydrate, isHydrating } from './hydrate.js';
+export { hydrate, isHydrating, collectSerializedState } from './hydrate.js';
+export type { HydrationStrategy, HydrateOptions } from './hydrate.js';
 
 // Priority scheduling
 export { startTransition, shouldYield, scheduleIdle, startIdle } from './scheduler.js';

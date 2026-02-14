@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { registerComponent, renderToString, renderPage, getTemplateHTML, getStateDefaults, parseHTML, renderTemplate } from '../renderer.js';
+import { registerComponent, renderToString, renderPage, getTemplateHTML, getStateDefaults, parseHTML, renderTemplate, resetInstanceCounters, computeInitialState, escapeJSON, getNextInstanceId, renderWithSuspense } from '../renderer.js';
+import type { SuspenseRenderContext } from '../renderer.js';
 import { VNode, VTextNode, VCommentNode } from '../vdom.js';
 
 // Helper: create a mock component class with various template shapes
@@ -19,7 +20,7 @@ function createMockComponent(options: {
 
 describe('registerComponent + renderToString', () => {
   beforeEach(() => {
-    // Register a fresh component for each test
+    resetInstanceCounters();
   });
 
   it('should register a component and render it to a string', () => {
@@ -660,5 +661,423 @@ describe('integration: renderToString with parsed HTML and renderTemplate', () =
     const html = renderToString('polyx-nested-div');
 
     expect(html).toContain('<div><div>Inner</div></div>');
+  });
+});
+
+// =============================================================================
+// Feature 2: SSR State Serialization, Instance IDs, and Suspense
+// =============================================================================
+
+describe('getNextInstanceId + resetInstanceCounters', () => {
+  beforeEach(() => {
+    resetInstanceCounters();
+  });
+
+  it('should start at 0 for a new tag name', () => {
+    expect(getNextInstanceId('polyx-test')).toBe(0);
+  });
+
+  it('should auto-increment for the same tag name', () => {
+    expect(getNextInstanceId('polyx-counter')).toBe(0);
+    expect(getNextInstanceId('polyx-counter')).toBe(1);
+    expect(getNextInstanceId('polyx-counter')).toBe(2);
+  });
+
+  it('should track separate counters for different tag names', () => {
+    expect(getNextInstanceId('polyx-a')).toBe(0);
+    expect(getNextInstanceId('polyx-b')).toBe(0);
+    expect(getNextInstanceId('polyx-a')).toBe(1);
+    expect(getNextInstanceId('polyx-b')).toBe(1);
+  });
+
+  it('should reset all counters to zero', () => {
+    getNextInstanceId('polyx-x');
+    getNextInstanceId('polyx-x');
+    getNextInstanceId('polyx-y');
+    resetInstanceCounters();
+    expect(getNextInstanceId('polyx-x')).toBe(0);
+    expect(getNextInstanceId('polyx-y')).toBe(0);
+  });
+});
+
+describe('computeInitialState', () => {
+  it('should return empty object when no _stateDefaults', () => {
+    const comp: any = {};
+    expect(computeInitialState(comp)).toEqual({});
+  });
+
+  it('should return _stateDefaults when no props override', () => {
+    const comp: any = { _stateDefaults: { count: 0, name: 'world' } };
+    expect(computeInitialState(comp)).toEqual({ count: 0, name: 'world' });
+  });
+
+  it('should override defaults with matching props', () => {
+    const comp: any = { _stateDefaults: { count: 0, name: 'world' } };
+    expect(computeInitialState(comp, { count: 10 })).toEqual({ count: 10, name: 'world' });
+  });
+
+  it('should not add props that are not in _stateDefaults', () => {
+    const comp: any = { _stateDefaults: { count: 0 } };
+    const state = computeInitialState(comp, { count: 5, extra: 'ignored' });
+    expect(state).toEqual({ count: 5 });
+    expect(state).not.toHaveProperty('extra');
+  });
+
+  it('should handle all state value types', () => {
+    const comp: any = {
+      _stateDefaults: {
+        num: 42,
+        str: 'hello',
+        bool: false,
+        nil: null,
+        arr: [1, 2],
+        obj: { a: 1 },
+      }
+    };
+    const state = computeInitialState(comp);
+    expect(state).toEqual({
+      num: 42,
+      str: 'hello',
+      bool: false,
+      nil: null,
+      arr: [1, 2],
+      obj: { a: 1 },
+    });
+  });
+
+  it('should handle empty _stateDefaults', () => {
+    const comp: any = { _stateDefaults: {} };
+    expect(computeInitialState(comp)).toEqual({});
+  });
+});
+
+describe('escapeJSON', () => {
+  it('should escape < characters to prevent </script> injection', () => {
+    const result = escapeJSON({ text: '</script>' });
+    expect(result).not.toContain('</script>');
+    expect(result).toContain('\\u003c');
+    expect(result).toContain('\\u003e');
+  });
+
+  it('should escape > characters', () => {
+    const result = escapeJSON({ val: 'a>b' });
+    expect(result).toContain('\\u003e');
+    expect(result).not.toContain('>');
+  });
+
+  it('should escape & characters', () => {
+    const result = escapeJSON({ val: 'a&b' });
+    expect(result).toContain('\\u0026');
+    expect(result).not.toContain('&');
+  });
+
+  it('should handle nested objects', () => {
+    const result = escapeJSON({ nested: { val: '<script>alert(1)</script>' } });
+    expect(result).not.toContain('<script>');
+    expect(result).toContain('\\u003c');
+  });
+
+  it('should return valid JSON content (parseable after unescaping)', () => {
+    const state = { count: 0, name: 'test' };
+    const result = escapeJSON(state);
+    // The escaped string should still be parseable as JSON
+    const parsed = JSON.parse(result);
+    expect(parsed).toEqual(state);
+  });
+
+  it('should handle empty state object', () => {
+    const result = escapeJSON({});
+    expect(result).toBe('{}');
+  });
+});
+
+describe('getStateDefaults with _stateDefaults', () => {
+  it('should prefer _stateDefaults over observedAttributes', () => {
+    const comp: any = {
+      _stateDefaults: { count: 0, name: 'hello' },
+      observedAttributes: ['count', 'name', 'extra'],
+    };
+    const defaults = getStateDefaults(comp);
+    expect(defaults).toEqual({ count: 0, name: 'hello' });
+    expect(defaults).not.toHaveProperty('extra');
+  });
+
+  it('should return a copy of _stateDefaults (not the same reference)', () => {
+    const original = { count: 0 };
+    const comp: any = { _stateDefaults: original };
+    const defaults = getStateDefaults(comp);
+    expect(defaults).toEqual(original);
+    expect(defaults).not.toBe(original);
+  });
+
+  it('should fall back to observedAttributes when _stateDefaults is absent', () => {
+    const comp: any = { observedAttributes: ['count'] };
+    const defaults = getStateDefaults(comp);
+    expect(defaults).toEqual({ count: undefined });
+  });
+});
+
+describe('renderToString: instance IDs and state serialization', () => {
+  beforeEach(() => {
+    resetInstanceCounters();
+  });
+
+  it('should add data-polyx-instance attribute to rendered output', () => {
+    const comp = createMockComponent({
+      template: '<div>Content</div>',
+      observedAttributes: [],
+    });
+    registerComponent('polyx-inst-test', comp);
+    const html = renderToString('polyx-inst-test');
+    expect(html).toContain('data-polyx-instance="0"');
+  });
+
+  it('should auto-increment instance IDs for the same component', () => {
+    const comp = createMockComponent({
+      template: '<div>Content</div>',
+      observedAttributes: [],
+    });
+    registerComponent('polyx-inst-multi', comp);
+    const html1 = renderToString('polyx-inst-multi');
+    const html2 = renderToString('polyx-inst-multi');
+    expect(html1).toContain('data-polyx-instance="0"');
+    expect(html2).toContain('data-polyx-instance="1"');
+  });
+
+  it('should serialize state as a script tag when serializeState is true (default)', () => {
+    const comp: any = {
+      template: '<div>Stateful</div>',
+      _stateDefaults: { count: 0, name: 'world' },
+    };
+    registerComponent('polyx-serialize', comp);
+    const html = renderToString('polyx-serialize');
+    expect(html).toContain('<script type="application/polyx-state"');
+    expect(html).toContain('data-for="polyx-serialize"');
+    expect(html).toContain('data-instance="0"');
+    // State should be serialized as JSON
+    expect(html).toContain('"count"');
+    expect(html).toContain('"name"');
+  });
+
+  it('should not serialize state when serializeState is false', () => {
+    const comp: any = {
+      template: '<div>No State Script</div>',
+      _stateDefaults: { count: 0 },
+    };
+    registerComponent('polyx-no-serialize', comp);
+    const html = renderToString('polyx-no-serialize', {}, { serializeState: false });
+    expect(html).not.toContain('<script type="application/polyx-state"');
+  });
+
+  it('should not emit state script tag when state is empty', () => {
+    const comp: any = {
+      template: '<div>Empty State</div>',
+      _stateDefaults: {},
+    };
+    registerComponent('polyx-empty-state', comp);
+    const html = renderToString('polyx-empty-state');
+    // No state to serialize, so no script tag
+    expect(html).not.toContain('<script type="application/polyx-state"');
+  });
+
+  it('should override state defaults with props in serialized state', () => {
+    const comp: any = {
+      template: '<div>Override</div>',
+      _stateDefaults: { count: 0 },
+    };
+    registerComponent('polyx-override', comp);
+    const html = renderToString('polyx-override', { count: 42 });
+    // The serialized state should have the overridden value
+    expect(html).toContain('"count":42');
+  });
+});
+
+describe('renderToString: hydration strategy attribute', () => {
+  beforeEach(() => {
+    resetInstanceCounters();
+  });
+
+  it('should not add data-hydrate attribute when strategy is "load" (default)', () => {
+    const comp: any = {
+      template: '<div>Load</div>',
+      _hydrationStrategy: 'load',
+    };
+    registerComponent('polyx-hyd-load', comp);
+    const html = renderToString('polyx-hyd-load');
+    expect(html).not.toContain('data-hydrate');
+  });
+
+  it('should add data-hydrate="none" when strategy is "none"', () => {
+    const comp: any = {
+      template: '<div>None</div>',
+      _hydrationStrategy: 'none',
+    };
+    registerComponent('polyx-hyd-none', comp);
+    const html = renderToString('polyx-hyd-none');
+    expect(html).toContain('data-hydrate="none"');
+  });
+
+  it('should add data-hydrate="interaction" when strategy is "interaction"', () => {
+    const comp: any = {
+      template: '<div>Interaction</div>',
+      _hydrationStrategy: 'interaction',
+    };
+    registerComponent('polyx-hyd-interact', comp);
+    const html = renderToString('polyx-hyd-interact');
+    expect(html).toContain('data-hydrate="interaction"');
+  });
+
+  it('should add data-hydrate="visible" when strategy is "visible"', () => {
+    const comp: any = {
+      template: '<div>Visible</div>',
+      _hydrationStrategy: 'visible',
+    };
+    registerComponent('polyx-hyd-visible', comp);
+    const html = renderToString('polyx-hyd-visible');
+    expect(html).toContain('data-hydrate="visible"');
+  });
+
+  it('should add data-hydrate="idle" when strategy is "idle"', () => {
+    const comp: any = {
+      template: '<div>Idle</div>',
+      _hydrationStrategy: 'idle',
+    };
+    registerComponent('polyx-hyd-idle', comp);
+    const html = renderToString('polyx-hyd-idle');
+    expect(html).toContain('data-hydrate="idle"');
+  });
+
+  it('should default to "load" when _hydrationStrategy is not set on class', () => {
+    const comp: any = {
+      template: '<div>Default</div>',
+    };
+    registerComponent('polyx-hyd-default', comp);
+    const html = renderToString('polyx-hyd-default');
+    // "load" is default, so no data-hydrate attribute
+    expect(html).not.toContain('data-hydrate');
+  });
+});
+
+describe('renderWithSuspense', () => {
+  beforeEach(() => {
+    resetInstanceCounters();
+  });
+
+  it('should render normally when no Promise is thrown', () => {
+    const comp: any = {
+      template: '<div>Normal</div>',
+      observedAttributes: [],
+    };
+    registerComponent('polyx-suspense-normal', comp);
+
+    const ctx: SuspenseRenderContext = {
+      boundaryIdCounter: 0,
+      pendingBoundaries: new Map(),
+    };
+
+    const html = renderWithSuspense('polyx-suspense-normal', {}, ctx);
+    expect(html).toContain('Normal');
+    expect(ctx.pendingBoundaries.size).toBe(0);
+  });
+
+  it('should catch thrown Promise and register a Suspense boundary', () => {
+    // Register a component that will throw a Promise
+    const promise = Promise.resolve('resolved');
+    const throwingClass: any = {
+      get template() {
+        throw promise;
+      },
+      observedAttributes: [],
+    };
+    registerComponent('polyx-suspense-throw', throwingClass);
+
+    const ctx: SuspenseRenderContext = {
+      boundaryIdCounter: 0,
+      pendingBoundaries: new Map(),
+    };
+
+    const html = renderWithSuspense('polyx-suspense-throw', {}, ctx);
+
+    // Should return fallback HTML
+    expect(html).toContain('data-suspense-id="0"');
+    expect(html).toContain('Loading...');
+
+    // Should have registered the boundary
+    expect(ctx.boundaryIdCounter).toBe(1);
+    expect(ctx.pendingBoundaries.size).toBe(1);
+    expect(ctx.pendingBoundaries.has(0)).toBe(true);
+
+    // Suppress unhandled rejection from the .then() chain inside renderWithSuspense
+    ctx.pendingBoundaries.get(0)!.promise.catch(() => {});
+  });
+
+  it('should use custom fallback function when provided', () => {
+    const promise = Promise.resolve('done');
+    const throwingClass: any = {
+      get template() {
+        throw promise;
+      },
+    };
+    registerComponent('polyx-suspense-custom-fb', throwingClass);
+
+    const ctx: SuspenseRenderContext = {
+      boundaryIdCounter: 0,
+      pendingBoundaries: new Map(),
+      fallbackFn: (id) => `<div class="skeleton" data-suspense-id="${id}">Custom Skeleton</div>`,
+    };
+
+    const html = renderWithSuspense('polyx-suspense-custom-fb', {}, ctx);
+    expect(html).toContain('Custom Skeleton');
+    expect(html).toContain('class="skeleton"');
+
+    // Suppress unhandled rejection
+    ctx.pendingBoundaries.get(0)!.promise.catch(() => {});
+  });
+
+  it('should re-throw non-Promise errors', () => {
+    const throwingClass: any = {
+      get template() {
+        throw new Error('real error');
+      },
+    };
+    registerComponent('polyx-suspense-error', throwingClass);
+
+    const ctx: SuspenseRenderContext = {
+      boundaryIdCounter: 0,
+      pendingBoundaries: new Map(),
+    };
+
+    expect(() => renderWithSuspense('polyx-suspense-error', {}, ctx)).toThrow('real error');
+  });
+
+  it('should increment boundary ID counter for multiple Suspense boundaries', () => {
+    const promise1 = Promise.resolve('a');
+    const promise2 = Promise.resolve('b');
+
+    const throwingClass1: any = {
+      get template() { throw promise1; },
+    };
+    const throwingClass2: any = {
+      get template() { throw promise2; },
+    };
+    registerComponent('polyx-suspense-multi-1', throwingClass1);
+    registerComponent('polyx-suspense-multi-2', throwingClass2);
+
+    const ctx: SuspenseRenderContext = {
+      boundaryIdCounter: 0,
+      pendingBoundaries: new Map(),
+    };
+
+    renderWithSuspense('polyx-suspense-multi-1', {}, ctx);
+    renderWithSuspense('polyx-suspense-multi-2', {}, ctx);
+
+    expect(ctx.boundaryIdCounter).toBe(2);
+    expect(ctx.pendingBoundaries.size).toBe(2);
+    expect(ctx.pendingBoundaries.has(0)).toBe(true);
+    expect(ctx.pendingBoundaries.has(1)).toBe(true);
+
+    // Suppress unhandled rejections
+    ctx.pendingBoundaries.get(0)!.promise.catch(() => {});
+    ctx.pendingBoundaries.get(1)!.promise.catch(() => {});
   });
 });

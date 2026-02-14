@@ -325,6 +325,9 @@ export abstract class PolyXElement extends HTMLElement {
   }
 
   protected _setDynamicValue(index: number, value: any) {
+    // In events-only mode (resumable hydration), skip all DOM updates
+    if ((this as any).__polyx_events_only) return;
+
     // Skip Arrays from cache check — they need reconciliation every time
     if (!Array.isArray(value) && this._valueCache[index] === value) {
       return; // Reference equality: skip unchanged primitives and objects
@@ -388,6 +391,9 @@ export abstract class PolyXElement extends HTMLElement {
 
   // Set a prop on a child component element at a given marker index
   protected _setDynamicProp(index: number, propName: string, value: any) {
+    // In events-only mode (resumable hydration), skip prop updates
+    if ((this as any).__polyx_events_only) return;
+
     const childEl = this._elements[index] || this._childElements.get(index);
     if (!childEl) return;
     if ('_setProp' in childEl) {
@@ -465,6 +471,9 @@ export abstract class PolyXElement extends HTMLElement {
   }
 
   protected _setDynamicAttribute(index: number, attrName: string, value: any) {
+    // In events-only mode (resumable hydration), skip all DOM updates
+    if ((this as any).__polyx_events_only) return;
+
     const el = this._elements[index];
     if (el) {
       if (value === false || value === null || value === undefined) {
@@ -576,6 +585,7 @@ export abstract class PolyXElement extends HTMLElement {
     if (!template) return;
 
     const isHydrating = (this as any).__polyx_hydrating === true;
+    const isResuming = (this as any).__polyx_resume === true;
 
     // Save children passed from parent (light DOM content before mount)
     if (!isHydrating && this.childNodes.length > 0 && !this._props.children) {
@@ -607,7 +617,54 @@ export abstract class PolyXElement extends HTMLElement {
     }
 
     this._hasMounted = true;
-    this._updateDynamicParts();
+
+    if (isResuming) {
+      // Resumable hydration: restore state, attach events only, schedule effects
+      const serializedState = (this as any).__polyx_serialized_state;
+      if (serializedState) {
+        Object.assign(this._state, serializedState);
+        delete (this as any).__polyx_serialized_state;
+      }
+      this._attachEventsOnly();
+    } else {
+      this._updateDynamicParts();
+    }
+  }
+
+  /**
+   * Attach only event handlers without touching the DOM.
+   * Used during resumable hydration to skip re-rendering while still
+   * binding event handlers and scheduling effects.
+   */
+  private _attachEventsOnly() {
+    if (!this._isConnected) return;
+
+    // Set events-only flag — _setDynamicValue and _setDynamicAttribute become no-ops
+    (this as any).__polyx_events_only = true;
+
+    setCurrentInstance(this._instance);
+    this._instance.hookIndex = 0;
+    try {
+      this._render();
+
+      // Schedule effects normally (they need to run for side effects)
+      this._runLayoutEffects();
+      if (this._instance.effects.length > 0) {
+        queueMicrotask(() => this._runEffects());
+      }
+    } catch (thrown) {
+      if (isSuspensePromise(thrown)) {
+        const boundary = findSuspenseBoundary(this);
+        if (boundary) {
+          boundary._handleSuspend(thrown as Promise<any>, this);
+        }
+      } else {
+        console.error('Resume hydration error:', thrown);
+      }
+    } finally {
+      setCurrentInstance(null);
+      (this as any).__polyx_events_only = false;
+    }
   }
 
   // Scan a DOM tree for dynamic element markers

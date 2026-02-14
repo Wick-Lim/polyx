@@ -504,3 +504,279 @@ function List({ items }) {
     expect(result.code).toContain('"static-key"');
   });
 });
+
+// =============================================================================
+// Feature 1: Compiler Metadata — _stateDefaults, _isInteractive, _hydrationStrategy
+// =============================================================================
+
+describe('compiler metadata: _stateDefaults', () => {
+  it('should generate _stateDefaults with initial state values', () => {
+    const code = `
+function Counter() {
+  const [count, setCount] = useState(0);
+  return <div>{count}</div>;
+}`;
+    const result = compile(code);
+    expect(result.code).toContain('_stateDefaults');
+    // Should contain an object with count: 0
+    expect(result.code).toMatch(/static\s+_stateDefaults\s*=\s*\{\s*count:\s*0\s*\}/);
+  });
+
+  it('should generate _stateDefaults with multiple states', () => {
+    const code = `
+function Profile() {
+  const [name, setName] = useState("Alice");
+  const [age, setAge] = useState(25);
+  return <div>{name} - {age}</div>;
+}`;
+    const result = compile(code);
+    expect(result.code).toContain('_stateDefaults');
+    // Both state defaults should be in the object
+    expect(result.code).toMatch(/_stateDefaults\s*=\s*\{/);
+    expect(result.code).toContain('name: "Alice"');
+    expect(result.code).toContain('age: 25');
+  });
+
+  it('should generate empty _stateDefaults when no useState calls', () => {
+    const code = `
+function Static({ label }) {
+  return <div>{label}</div>;
+}`;
+    const result = compile(code);
+    expect(result.code).toContain('_stateDefaults');
+    expect(result.code).toMatch(/_stateDefaults\s*=\s*\{\}/);
+  });
+
+  it('should generate _stateDefaults with boolean initial value', () => {
+    const code = `
+function Toggle() {
+  const [active, setActive] = useState(false);
+  return <div>{active ? "on" : "off"}</div>;
+}`;
+    const result = compile(code);
+    expect(result.code).toMatch(/active:\s*false/);
+  });
+
+  it('should generate _stateDefaults with string initial value', () => {
+    const code = `
+function Greeting() {
+  const [message, setMessage] = useState("hello");
+  return <div>{message}</div>;
+}`;
+    const result = compile(code);
+    expect(result.code).toMatch(/message:\s*"hello"/);
+  });
+
+  it('should generate _stateDefaults with null initial value', () => {
+    const code = `
+function DataView() {
+  const [data, setData] = useState(null);
+  return <div>{data}</div>;
+}`;
+    const result = compile(code);
+    expect(result.code).toMatch(/data:\s*null/);
+  });
+});
+
+describe('compiler metadata: _isInteractive', () => {
+  it('should set _isInteractive to true when component has state', () => {
+    const code = `
+function Counter() {
+  const [count, setCount] = useState(0);
+  return <div>{count}</div>;
+}`;
+    const result = compile(code);
+    expect(result.code).toContain('_isInteractive');
+    expect(result.code).toMatch(/static\s+_isInteractive\s*=\s*true/);
+  });
+
+  it('should set _isInteractive to true when component has events only', () => {
+    const code = `
+function ClickTracker() {
+  return <button onClick={() => console.log('clicked')}>Click</button>;
+}`;
+    const result = compile(code);
+    expect(result.code).toMatch(/static\s+_isInteractive\s*=\s*true/);
+  });
+
+  it('should set _isInteractive to true when component has useEffect', () => {
+    const code = `
+function Logger() {
+  const [x, setX] = useState(0);
+  useEffect(() => {
+    console.log("mounted");
+  }, []);
+  return <div>{x}</div>;
+}`;
+    const result = compile(code);
+    expect(result.code).toMatch(/static\s+_isInteractive\s*=\s*true/);
+  });
+
+  it('should set _isInteractive to true when component has useLayoutEffect', () => {
+    const code = `
+function Measurer() {
+  const [w, setW] = useState(0);
+  useLayoutEffect(() => {
+    console.log("layout");
+  }, []);
+  return <div>{w}</div>;
+}`;
+    const result = compile(code);
+    expect(result.code).toMatch(/static\s+_isInteractive\s*=\s*true/);
+  });
+
+  it('should set _isInteractive to false for a purely static component', () => {
+    const code = `
+function StaticBanner() {
+  return <div><h1>Welcome</h1></div>;
+}`;
+    const result = compile(code);
+    expect(result.code).toMatch(/static\s+_isInteractive\s*=\s*false/);
+  });
+
+  it('should set _isInteractive to false for component with only props (no state/events/effects)', () => {
+    const code = `
+function Label({ text }) {
+  return <span>{text}</span>;
+}`;
+    const result = compile(code);
+    expect(result.code).toMatch(/static\s+_isInteractive\s*=\s*false/);
+  });
+});
+
+describe('compiler metadata: _hydrationStrategy', () => {
+  it('should detect "load" strategy for component with state', () => {
+    const code = `
+function Counter() {
+  const [count, setCount] = useState(0);
+  return <div>{count}</div>;
+}`;
+    const result = compile(code);
+    expect(result.code).toContain('_hydrationStrategy');
+    expect(result.code).toMatch(/static\s+_hydrationStrategy\s*=\s*"load"/);
+  });
+
+  it('should detect "load" strategy for component with effects', () => {
+    const code = `
+function Timer() {
+  const [time, setTime] = useState(0);
+  useEffect(() => {
+    const id = setInterval(() => setTime(t => t + 1), 1000);
+    return () => clearInterval(id);
+  }, []);
+  return <div>{time}</div>;
+}`;
+    const result = compile(code);
+    expect(result.code).toMatch(/static\s+_hydrationStrategy\s*=\s*"load"/);
+  });
+
+  it('should detect "none" strategy for purely static component', () => {
+    const code = `
+function Banner() {
+  return <div><h1>Static Banner</h1></div>;
+}`;
+    const result = compile(code);
+    expect(result.code).toMatch(/static\s+_hydrationStrategy\s*=\s*"none"/);
+  });
+
+  it('should detect "interaction" strategy for events-only component (no state, no effects)', () => {
+    const code = `
+function ClickableDiv() {
+  return <div onClick={() => console.log("click")}>Click me</div>;
+}`;
+    const result = compile(code);
+    expect(result.code).toMatch(/static\s+_hydrationStrategy\s*=\s*"interaction"/);
+  });
+
+  it('should detect "load" for component with state and events', () => {
+    const code = `
+function InteractiveCounter() {
+  const [count, setCount] = useState(0);
+  return <button onClick={() => setCount(c => c + 1)}>{count}</button>;
+}`;
+    const result = compile(code);
+    expect(result.code).toMatch(/static\s+_hydrationStrategy\s*=\s*"load"/);
+  });
+
+  it('should detect "load" for component with effects but no state/events', () => {
+    const code = `
+function EffectOnly({ data }) {
+  useEffect(() => {
+    console.log("side effect");
+  }, [data]);
+  return <div>{data}</div>;
+}`;
+    const result = compile(code);
+    // Effects trigger "load" strategy since state is needed
+    expect(result.code).toMatch(/static\s+_hydrationStrategy\s*=\s*"load"/);
+  });
+
+  it('should respect @hydrate annotation overriding auto-detection', () => {
+    // The @hydrate annotation must be in a leading comment on the function
+    const code = `
+/** @hydrate visible */
+function LazyImage({ src }) {
+  return <img src={src} />;
+}`;
+    const result = compile(code);
+    expect(result.code).toMatch(/static\s+_hydrationStrategy\s*=\s*"visible"/);
+  });
+
+  it('should respect @hydrate idle annotation', () => {
+    const code = `
+/** @hydrate idle */
+function Analytics() {
+  const [x, setX] = useState(0);
+  return <div>{x}</div>;
+}`;
+    const result = compile(code);
+    expect(result.code).toMatch(/static\s+_hydrationStrategy\s*=\s*"idle"/);
+  });
+
+  it('should respect @hydrate none annotation even with interactive component', () => {
+    const code = `
+/** @hydrate none */
+function StaticContent() {
+  const [x, setX] = useState(0);
+  return <div>{x}</div>;
+}`;
+    const result = compile(code);
+    expect(result.code).toMatch(/static\s+_hydrationStrategy\s*=\s*"none"/);
+  });
+
+  it('should respect @hydrate interaction annotation', () => {
+    const code = `
+/** @hydrate interaction */
+function LazyButton() {
+  const [count, setCount] = useState(0);
+  return <button onClick={() => setCount(c => c + 1)}>{count}</button>;
+}`;
+    const result = compile(code);
+    expect(result.code).toMatch(/static\s+_hydrationStrategy\s*=\s*"interaction"/);
+  });
+
+  it('should respect @hydrate load annotation on static component', () => {
+    const code = `
+/** @hydrate load */
+function ForcedHydration() {
+  return <div>static but forced load</div>;
+}`;
+    const result = compile(code);
+    expect(result.code).toMatch(/static\s+_hydrationStrategy\s*=\s*"load"/);
+  });
+
+  it('should generate all three metadata properties together', () => {
+    const code = `
+function App() {
+  const [count, setCount] = useState(0);
+  useEffect(() => console.log(count), [count]);
+  return <button onClick={() => setCount(c => c + 1)}>{count}</button>;
+}`;
+    const result = compile(code);
+    expect(result.code).toContain('_stateDefaults');
+    expect(result.code).toContain('_isInteractive');
+    expect(result.code).toContain('_hydrationStrategy');
+    expect(result.code).toMatch(/static\s+_isInteractive\s*=\s*true/);
+    expect(result.code).toMatch(/static\s+_hydrationStrategy\s*=\s*"load"/);
+  });
+});

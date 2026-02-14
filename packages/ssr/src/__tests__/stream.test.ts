@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { renderToReadableStream, buildReplacementChunk } from '../stream.js';
-import { registerComponent, renderToString } from '../renderer.js';
+import { registerComponent, renderToString, resetInstanceCounters } from '../renderer.js';
+import type { SuspenseRenderContext } from '../renderer.js';
 
 // Helper: read a ReadableStream to a string
 async function streamToString(stream: ReadableStream<Uint8Array>): Promise<string> {
@@ -30,6 +31,7 @@ function createMockComponent(templateHTML: string) {
 
 describe('renderToReadableStream', () => {
   beforeEach(() => {
+    resetInstanceCounters();
     // Register a test component
     const mockComponent = createMockComponent('<div>Hello SSR Stream</div>');
     registerComponent('polyx-stream-test', mockComponent);
@@ -49,7 +51,10 @@ describe('renderToReadableStream', () => {
   });
 
   it('should match renderToString output for shell', async () => {
+    // Reset counters so both calls start from instance 0
+    resetInstanceCounters();
     const stringOutput = renderToString('polyx-stream-test');
+    resetInstanceCounters();
     const stream = renderToReadableStream('polyx-stream-test');
     const streamOutput = await streamToString(stream);
 
@@ -430,5 +435,167 @@ describe('renderToReadableStream signal abort after start', () => {
     // Stream should already be closed
     const result = await reader.read();
     expect(result.done).toBe(true);
+  });
+});
+
+// =============================================================================
+// Streaming SSR Enhancements: auto-hydration trigger, Suspense, timeout
+// =============================================================================
+
+describe('buildReplacementChunk: auto-hydration trigger', () => {
+  it('should include auto-hydration check for window.__POLYX_HYDRATE__', () => {
+    const chunk = buildReplacementChunk(0, '<div>Content</div>');
+    expect(chunk).toContain('__POLYX_HYDRATE__');
+    expect(chunk).toContain('data-polyx-hydrate');
+  });
+
+  it('should query for [data-polyx-hydrate] elements in the replacement content', () => {
+    const chunk = buildReplacementChunk(5, '<polyx-widget data-polyx-hydrate="">widget</polyx-widget>');
+    // The script should look for hydrate markers in the new DOM
+    expect(chunk).toContain('querySelectorAll("[data-polyx-hydrate]")');
+  });
+
+  it('should only call __POLYX_HYDRATE__ if hydration targets exist in the new content', () => {
+    const chunk = buildReplacementChunk(0, '<div>simple</div>');
+    // Check that it does a conditional check: if(h.length && window.__POLYX_HYDRATE__)
+    expect(chunk).toContain('h.length');
+    expect(chunk).toContain('window.__POLYX_HYDRATE__');
+  });
+});
+
+describe('renderToReadableStream: _useSuspense option', () => {
+  beforeEach(() => {
+    resetInstanceCounters();
+  });
+
+  it('should use renderWithSuspense when _useSuspense is true', async () => {
+    const mockComponent = createMockComponent('<div>Suspense Shell</div>');
+    registerComponent('polyx-stream-suspense', mockComponent);
+
+    const suspenseCtx: SuspenseRenderContext = {
+      boundaryIdCounter: 0,
+      pendingBoundaries: new Map(),
+    };
+
+    const stream = renderToReadableStream('polyx-stream-suspense', {}, {
+      _useSuspense: true,
+      _suspenseContext: suspenseCtx,
+    });
+    const html = await streamToString(stream);
+
+    expect(html).toContain('Suspense Shell');
+  });
+
+  it('should stream Suspense boundary replacements after shell', async () => {
+    const mockComponent = createMockComponent('<div>Shell</div>');
+    registerComponent('polyx-stream-susp-boundary', mockComponent);
+
+    const suspenseCtx: SuspenseRenderContext = {
+      boundaryIdCounter: 1,
+      pendingBoundaries: new Map([
+        [0, {
+          promise: Promise.resolve('<div>Resolved Async</div>'),
+          fallbackHTML: '<div data-suspense-id="0">Loading...</div>',
+        }],
+      ]),
+    };
+
+    const stream = renderToReadableStream('polyx-stream-susp-boundary', {}, {
+      _useSuspense: true,
+      _suspenseContext: suspenseCtx,
+    });
+    const html = await streamToString(stream);
+
+    expect(html).toContain('Shell');
+    expect(html).toContain('<template id="$B0-content">');
+    expect(html).toContain('<div>Resolved Async</div>');
+  });
+
+  it('should merge legacy _pendingBoundaries with Suspense boundaries', async () => {
+    const mockComponent = createMockComponent('<div>Merged</div>');
+    registerComponent('polyx-stream-merge', mockComponent);
+
+    const legacyBoundaries = new Map<number, { promise: Promise<string>; fallbackMarker: string }>();
+    legacyBoundaries.set(10, {
+      promise: Promise.resolve('<div>Legacy Content</div>'),
+      fallbackMarker: '<!--$B10-->',
+    });
+
+    const suspenseCtx: SuspenseRenderContext = {
+      boundaryIdCounter: 1,
+      pendingBoundaries: new Map([
+        [20, {
+          promise: Promise.resolve('<div>Suspense Content</div>'),
+          fallbackHTML: '<div data-suspense-id="20">Loading...</div>',
+        }],
+      ]),
+    };
+
+    const stream = renderToReadableStream('polyx-stream-merge', {}, {
+      _useSuspense: true,
+      _suspenseContext: suspenseCtx,
+      _pendingBoundaries: legacyBoundaries,
+    });
+    const html = await streamToString(stream);
+
+    expect(html).toContain('<template id="$B10-content">');
+    expect(html).toContain('<div>Legacy Content</div>');
+    expect(html).toContain('<template id="$B20-content">');
+    expect(html).toContain('<div>Suspense Content</div>');
+  });
+});
+
+describe('renderToReadableStream: suspenseTimeout', () => {
+  beforeEach(() => {
+    resetInstanceCounters();
+  });
+
+  it('should emit error fallback when a boundary exceeds the suspense timeout', async () => {
+    const mockComponent = createMockComponent('<div>Timeout Test</div>');
+    registerComponent('polyx-stream-timeout', mockComponent);
+
+    const onError = vi.fn();
+    const neverResolve = new Promise<string>(() => {}); // never resolves
+
+    const pendingBoundaries = new Map<number, { promise: Promise<string>; fallbackMarker: string }>();
+    pendingBoundaries.set(0, {
+      promise: neverResolve,
+      fallbackMarker: '<!--$B0-->',
+    });
+
+    const stream = renderToReadableStream('polyx-stream-timeout', {}, {
+      _pendingBoundaries: pendingBoundaries,
+      suspenseTimeout: 50, // 50ms timeout
+      onError,
+    });
+    const html = await streamToString(stream);
+
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect(html).toContain('Error loading content');
+    expect(html).toContain('<template id="$B0-content">');
+  }, 10000);
+
+  it('should resolve normally when boundary finishes before timeout', async () => {
+    const mockComponent = createMockComponent('<div>Fast</div>');
+    registerComponent('polyx-stream-fast', mockComponent);
+
+    const onError = vi.fn();
+    const fastResolve = Promise.resolve('<div>Loaded quickly</div>');
+
+    const pendingBoundaries = new Map<number, { promise: Promise<string>; fallbackMarker: string }>();
+    pendingBoundaries.set(0, {
+      promise: fastResolve,
+      fallbackMarker: '<!--$B0-->',
+    });
+
+    const stream = renderToReadableStream('polyx-stream-fast', {}, {
+      _pendingBoundaries: pendingBoundaries,
+      suspenseTimeout: 5000,
+      onError,
+    });
+    const html = await streamToString(stream);
+
+    expect(onError).not.toHaveBeenCalled();
+    expect(html).toContain('<div>Loaded quickly</div>');
   });
 });

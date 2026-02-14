@@ -11,6 +11,20 @@ export interface SSROptions {
   componentClass?: any;
 }
 
+export interface SSRRenderOptions {
+  /** Whether to serialize component state as JSON script tags (default: true) */
+  serializeState?: boolean;
+}
+
+export interface SuspenseRenderContext {
+  /** Auto-incrementing boundary ID counter */
+  boundaryIdCounter: number;
+  /** Map of pending Suspense boundaries */
+  pendingBoundaries: Map<number, { promise: Promise<string>; fallbackHTML: string }>;
+  /** Custom fallback HTML generator */
+  fallbackFn?: (boundaryId: number) => string;
+}
+
 // Component registry for SSR
 const componentRegistry = new Map<string, any>();
 
@@ -26,9 +40,10 @@ export function registerComponent(tagName: string, componentClass: any): void {
  *
  * @param tagName - The custom element tag name (e.g., "polyx-counter")
  * @param props - Props to pass to the component
+ * @param options - SSR render options
  * @returns HTML string
  */
-export function renderToString(tagName: string, props: Record<string, any> = {}): string {
+export function renderToString(tagName: string, props: Record<string, any> = {}, options: SSRRenderOptions = {}): string {
   const componentClass = componentRegistry.get(tagName);
   if (!componentClass) {
     throw new Error(`Component "${tagName}" not registered. Use registerComponent() first.`);
@@ -48,6 +63,16 @@ export function renderToString(tagName: string, props: Record<string, any> = {})
 
   // Add hydration marker
   result.setAttribute('data-polyx-hydrate', '');
+
+  // Add instance ID for state serialization
+  const instanceId = getNextInstanceId(tagName);
+  result.setAttribute('data-polyx-instance', String(instanceId));
+
+  // Add hydration strategy attribute
+  const strategy: string = componentClass._hydrationStrategy ?? 'load';
+  if (strategy !== 'load') {
+    result.setAttribute('data-hydrate', strategy);
+  }
 
   // Copy props as attributes for primitive values
   for (const [key, value] of Object.entries(props)) {
@@ -71,7 +96,46 @@ export function renderToString(tagName: string, props: Record<string, any> = {})
     result.appendChild(child);
   }
 
-  return result.toHTML();
+  let html = result.toHTML();
+
+  // Serialize state as JSON script tag for resumable hydration
+  if (options.serializeState !== false) {
+    const state = computeInitialState(componentClass, props);
+    if (Object.keys(state).length > 0) {
+      html += `<script type="application/polyx-state" data-for="${tagName}" data-instance="${instanceId}">${escapeJSON(state)}</script>`;
+    }
+  }
+
+  return html;
+}
+
+/**
+ * Render a component with Suspense boundary awareness.
+ * If the render throws a Promise, it registers a Suspense boundary and returns fallback HTML.
+ */
+export function renderWithSuspense(
+  tagName: string,
+  props: Record<string, any>,
+  ctx: SuspenseRenderContext
+): string {
+  try {
+    return renderToString(tagName, props);
+  } catch (thrown: any) {
+    if (thrown && typeof thrown.then === 'function') {
+      // Promise thrown → Suspense boundary
+      const boundaryId = ctx.boundaryIdCounter++;
+      const fallbackHTML = ctx.fallbackFn
+        ? ctx.fallbackFn(boundaryId)
+        : `<div data-suspense-id="${boundaryId}" style="display:contents">Loading...</div>`;
+
+      ctx.pendingBoundaries.set(boundaryId, {
+        promise: thrown.then(() => renderToString(tagName, props)),
+        fallbackHTML,
+      });
+      return fallbackHTML;
+    }
+    throw thrown;
+  }
 }
 
 /**
@@ -136,7 +200,12 @@ export function getTemplateHTML(componentClass: any): string | null {
 export function getStateDefaults(componentClass: any): Record<string, any> {
   const defaults: Record<string, any> = {};
 
-  // Check observedAttributes for state names
+  // Use _stateDefaults if available (new compiler output)
+  if (componentClass._stateDefaults) {
+    return { ...componentClass._stateDefaults };
+  }
+
+  // Fallback: Check observedAttributes for state names
   const attrs = componentClass.observedAttributes;
   if (Array.isArray(attrs)) {
     for (const attr of attrs) {
@@ -145,6 +214,51 @@ export function getStateDefaults(componentClass: any): Record<string, any> {
   }
 
   return defaults;
+}
+
+// Instance ID counters per tag name
+const instanceCounters = new Map<string, number>();
+
+/**
+ * Get the next instance ID for a given tag name (auto-incrementing)
+ */
+export function getNextInstanceId(tagName: string): number {
+  const current = instanceCounters.get(tagName) ?? 0;
+  instanceCounters.set(tagName, current + 1);
+  return current;
+}
+
+/**
+ * Reset all instance counters (useful between SSR requests)
+ */
+export function resetInstanceCounters(): void {
+  instanceCounters.clear();
+}
+
+/**
+ * Compute initial state from _stateDefaults and props
+ */
+export function computeInitialState(componentClass: any, props: Record<string, any> = {}): Record<string, any> {
+  const defaults = componentClass._stateDefaults ?? {};
+  const state: Record<string, any> = {};
+
+  for (const [key, value] of Object.entries(defaults)) {
+    // Props can override state defaults
+    state[key] = key in props ? props[key] : value;
+  }
+
+  return state;
+}
+
+/**
+ * Escape JSON for safe embedding in a <script> tag.
+ * Prevents </script> injection.
+ */
+export function escapeJSON(state: Record<string, any>): string {
+  return JSON.stringify(state)
+    .replace(/</g, '\\u003c')
+    .replace(/>/g, '\\u003e')
+    .replace(/&/g, '\\u0026');
 }
 
 // Simple HTML parser for templates → VNode tree (exported for streaming SSR)

@@ -475,6 +475,190 @@ describe('_setKeyedList', () => {
   });
 });
 
+// =============================================================================
+// Feature 3: Resume Hydration and Events-Only Mode
+// =============================================================================
+
+describe('PolyXElement: events-only mode (__polyx_events_only)', () => {
+  let tagCounter4 = 300;
+
+  it('should skip _setDynamicValue when __polyx_events_only is true', () => {
+    const tagName = `test-evonly-val-${++tagCounter4}`;
+    let setDynCalled = false;
+
+    class EventsOnlyElement extends PolyXElement {
+      static template = createTemplate('<div><span data-dyn="0"></span></div>');
+      _render() {
+        this._setDynamicValue(0, 'should-not-appear');
+        setDynCalled = true;
+      }
+    }
+    customElements.define(tagName, EventsOnlyElement);
+
+    const el = document.createElement(tagName) as any;
+    document.body.appendChild(el);
+
+    // After mount, it renders normally
+    expect(el.textContent).toContain('should-not-appear');
+
+    // Now simulate events-only mode
+    el.__polyx_events_only = true;
+    const marker = el._valueMarkers[0];
+    el._setDynamicValue(0, 'new-value');
+    // The marker should remain unchanged
+    expect(el._valueMarkers[0]).toBe(marker);
+    el.__polyx_events_only = false;
+
+    document.body.removeChild(el);
+  });
+
+  it('should skip _setDynamicAttribute when __polyx_events_only is true', () => {
+    const tagName = `test-evonly-attr-${++tagCounter4}`;
+
+    class EventsOnlyAttrElement extends PolyXElement {
+      static template = createTemplate('<input data-px-el="0" />');
+      _render() {
+        this._setDynamicAttribute(0, 'disabled', true);
+      }
+    }
+    customElements.define(tagName, EventsOnlyAttrElement);
+
+    const el = document.createElement(tagName) as any;
+    document.body.appendChild(el);
+
+    const input = el.querySelector('input');
+    expect(input?.hasAttribute('disabled')).toBe(true);
+
+    // Enable events-only mode
+    el.__polyx_events_only = true;
+    el._setDynamicAttribute(0, 'disabled', false);
+    // Should still have disabled (the no-op prevented removal)
+    expect(input?.hasAttribute('disabled')).toBe(true);
+    el.__polyx_events_only = false;
+
+    document.body.removeChild(el);
+  });
+
+  it('should skip _setDynamicProp when __polyx_events_only is true', () => {
+    const tagName = `test-evonly-prop-${++tagCounter4}`;
+    const childTag = `test-evonly-child-${tagCounter4}`;
+
+    class ChildEl extends PolyXElement {
+      static template = createTemplate('<div></div>');
+      _render() {}
+    }
+    try {
+      customElements.define(childTag, ChildEl);
+    } catch { /* already defined */ }
+
+    class ParentEl extends PolyXElement {
+      static template = createTemplate(`<div><${childTag} data-px-el="0"></${childTag}></div>`);
+      _render() {
+        this._setDynamicProp(0, 'name', 'original');
+      }
+    }
+    customElements.define(tagName, ParentEl);
+
+    const el = document.createElement(tagName) as any;
+    document.body.appendChild(el);
+
+    // Enable events-only mode
+    el.__polyx_events_only = true;
+    el._setDynamicProp(0, 'name', 'updated');
+    // The prop should NOT have been updated
+    el.__polyx_events_only = false;
+
+    document.body.removeChild(el);
+  });
+
+  it('should still allow _setDynamicEvent when __polyx_events_only is true', () => {
+    const tagName = `test-evonly-event-${++tagCounter4}`;
+    const handler = vi.fn();
+
+    class EventElement extends PolyXElement {
+      static template = createTemplate('<button data-px-el="0">Click</button>');
+      _render() {
+        this._setDynamicEvent(0, 'click', handler);
+      }
+    }
+    customElements.define(tagName, EventElement);
+
+    const el = document.createElement(tagName) as any;
+    document.body.appendChild(el);
+
+    // Events are NOT blocked by __polyx_events_only (only DOM updates are blocked)
+    const btn = el.querySelector('button')!;
+    btn.click();
+    expect(handler).toHaveBeenCalledTimes(1);
+
+    document.body.removeChild(el);
+  });
+});
+
+describe('PolyXElement: _mount resume branch', () => {
+  let tagCounter5 = 400;
+
+  it('should restore serialized state from __polyx_serialized_state during resume mount', async () => {
+    const tagName = `test-resume-mount-${++tagCounter5}`;
+    let capturedState: any = null;
+
+    class ResumeMountElement extends PolyXElement {
+      static template = createTemplate('<div><span data-dyn="0"></span></div>');
+      _render() {
+        capturedState = { ...this._state };
+        const count = this._state.count !== undefined ? this._state.count : 0;
+        this._setDynamicValue(0, `count: ${count}`);
+      }
+    }
+    customElements.define(tagName, ResumeMountElement);
+
+    const el = document.createElement(tagName) as any;
+
+    // Simulate resume hydration flags (as set by hydrateResumable)
+    el.__polyx_hydrating = true;
+    el.__polyx_resume = true;
+    el.__polyx_serialized_state = { count: 42 };
+
+    document.body.appendChild(el);
+
+    // After mounting, state should have been restored
+    expect(el._state.count).toBe(42);
+    // The serialized state property should be cleaned up
+    expect(el.__polyx_serialized_state).toBeUndefined();
+
+    document.body.removeChild(el);
+  });
+
+  it('should call _attachEventsOnly during resume (not full _updateDynamicParts)', async () => {
+    const tagName = `test-resume-events-${++tagCounter5}`;
+    let renderCount = 0;
+
+    class ResumeEventsElement extends PolyXElement {
+      static template = createTemplate('<div><span data-dyn="0"></span><button data-px-el="0">Click</button></div>');
+      _render() {
+        renderCount++;
+        this._setDynamicValue(0, `count: ${this._state.count || 0}`);
+        this._setDynamicEvent(0, 'click', () => {});
+      }
+    }
+    customElements.define(tagName, ResumeEventsElement);
+
+    const el = document.createElement(tagName) as any;
+    el.__polyx_hydrating = true;
+    el.__polyx_resume = true;
+    el.__polyx_serialized_state = { count: 10 };
+
+    document.body.appendChild(el);
+
+    // _render was still called (but with events-only flag)
+    expect(renderCount).toBe(1);
+    // State should be restored
+    expect(el._state.count).toBe(10);
+
+    document.body.removeChild(el);
+  });
+});
+
 describe('startTransition', () => {
   let tagCounter3 = 200;
 

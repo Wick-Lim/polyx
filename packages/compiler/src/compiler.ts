@@ -355,7 +355,64 @@ function transformComponent(
     )
   );
 
-  // 3. Getters and Setters for each state
+  // 3. Static metadata for SSR: _stateDefaults, _isInteractive, _hydrationStrategy
+
+  // _stateDefaults: initial state values for SSR serialization
+  const stateDefaultsProps = states.map(s =>
+    t.objectProperty(t.identifier(s.name), s.default)
+  );
+  classMembers.push(
+    t.classProperty(
+      t.identifier('_stateDefaults'),
+      t.objectExpression(stateDefaultsProps),
+      null,
+      null,
+      false,
+      true // static
+    )
+  );
+
+  // Detect if component has effects (useEffect/useLayoutEffect)
+  const hasEffects = filteredBody.some(stmt => {
+    if (t.isExpressionStatement(stmt) && t.isCallExpression(stmt.expression) && t.isIdentifier(stmt.expression.callee)) {
+      return stmt.expression.callee.name === 'useEffect' || stmt.expression.callee.name === 'useLayoutEffect';
+    }
+    if (t.isVariableDeclaration(stmt)) {
+      const decl = stmt.declarations[0];
+      if (decl && t.isCallExpression(decl.init) && t.isIdentifier(decl.init.callee)) {
+        return decl.init.callee.name === 'useEffect' || decl.init.callee.name === 'useLayoutEffect';
+      }
+    }
+    return false;
+  });
+
+  // _isInteractive: true if component has state, events, or effects
+  const isInteractive = states.length > 0 || dynamicEvents.length > 0 || hasEffects;
+  classMembers.push(
+    t.classProperty(
+      t.identifier('_isInteractive'),
+      t.booleanLiteral(isInteractive),
+      null,
+      null,
+      false,
+      true // static
+    )
+  );
+
+  // _hydrationStrategy: detect from @hydrate annotation or auto-detect
+  const hydrationStrategy = detectHydrationStrategy(func, states, dynamicEvents, hasEffects);
+  classMembers.push(
+    t.classProperty(
+      t.identifier('_hydrationStrategy'),
+      t.stringLiteral(hydrationStrategy),
+      null,
+      null,
+      false,
+      true // static
+    )
+  );
+
+  // 4. Getters and Setters for each state
   states.forEach(state => {
     classMembers.push(
       t.classMethod('get', t.identifier(state.name), [], t.blockStatement([
@@ -369,7 +426,7 @@ function transformComponent(
     );
   });
 
-  // 4. _render() method
+  // 5. _render() method
   const renderBodyStatements: t.Statement[] = [
     ...transformedBody,
 
@@ -430,7 +487,7 @@ function transformComponent(
     t.classMethod('method', t.identifier('_render'), [], t.blockStatement(renderBodyStatements))
   );
 
-  // 5. Fine-grained reactivity: per-state update methods with hook dependency analysis
+  // 6. Fine-grained reactivity: per-state update methods with hook dependency analysis
   // Unlike old approach that skipped _renderState_* when derived hooks exist,
   // we now build a hook dependency graph so _renderState_* can selectively
   // re-execute only affected hooks (via _execMemo/_queueEffect) or read cache (_readHook).
@@ -824,7 +881,7 @@ function transformComponent(
     });
   }
 
-  // 6. Scoped CSS — static _scopedCSS property and connectedCallback injection
+  // 7. Scoped CSS — static _scopedCSS property and connectedCallback injection
   if (scopedCSSText) {
     classMembers.push(
       t.classProperty(
@@ -1477,6 +1534,32 @@ function processAttributes(
   }
 
   return attrs.length > 0 ? ' ' + attrs.join(' ') : '';
+}
+
+// Detect hydration strategy from @hydrate annotation or auto-detect
+function detectHydrationStrategy(
+  func: t.FunctionDeclaration | t.ArrowFunctionExpression | t.FunctionExpression,
+  states: Array<{ name: string; setter: string; default: t.Expression }>,
+  dynamicEvents: { elementIdx: number; event: string; handler: t.Expression }[],
+  hasEffects: boolean
+): string {
+  // Check for @hydrate annotation in leading comments
+  const comments = (func as any).leadingComments || [];
+  for (const comment of comments) {
+    const match = comment.value.match(/@hydrate\s+(load|visible|idle|interaction|none)/);
+    if (match) {
+      return match[1];
+    }
+  }
+
+  // Auto-detect based on component characteristics
+  if (states.length === 0 && dynamicEvents.length === 0 && !hasEffects) {
+    return 'none'; // Pure static component
+  }
+  if (states.length === 0 && !hasEffects && dynamicEvents.length > 0) {
+    return 'interaction'; // Events only — hydrate on first interaction
+  }
+  return 'load'; // Has state or effects — hydrate immediately
 }
 
 // Find which identifiers from a known set are referenced in an expression

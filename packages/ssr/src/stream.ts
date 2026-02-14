@@ -4,11 +4,13 @@
 import { VNode, VTextNode, VCommentNode } from './vdom.js';
 import {
   renderToString,
+  renderWithSuspense,
   getTemplateHTML,
   getStateDefaults,
   parseHTML,
   renderTemplate,
 } from './renderer.js';
+import type { SuspenseRenderContext } from './renderer.js';
 
 interface StreamOptions {
   /** Bootstrap script URLs to include at the end of the shell */
@@ -17,8 +19,14 @@ interface StreamOptions {
   onError?: (error: Error) => void;
   /** AbortSignal to cancel streaming */
   signal?: AbortSignal;
+  /** Timeout in ms for pending Suspense boundaries (default: 30000) */
+  suspenseTimeout?: number;
   /** @internal Inject pending boundaries for testing */
   _pendingBoundaries?: Map<number, { promise: Promise<string>; fallbackMarker: string }>;
+  /** @internal Use Suspense-aware rendering for shell */
+  _useSuspense?: boolean;
+  /** @internal Suspense render context for testing */
+  _suspenseContext?: SuspenseRenderContext;
 }
 
 // Unique boundary ID counter
@@ -38,12 +46,28 @@ export function renderToReadableStream(
   props: Record<string, any> = {},
   options: StreamOptions = {}
 ): ReadableStream<Uint8Array> {
-  const { bootstrapScripts = [], onError, signal, _pendingBoundaries } = options;
+  const {
+    bootstrapScripts = [],
+    onError,
+    signal,
+    suspenseTimeout = 30000,
+    _pendingBoundaries,
+    _useSuspense,
+    _suspenseContext,
+  } = options;
   const encoder = new TextEncoder();
-  const pendingBoundaries = _pendingBoundaries ?? new Map<number, {
+
+  // Legacy pending boundaries for backward compat
+  const legacyBoundaries = _pendingBoundaries ?? new Map<number, {
     promise: Promise<string>;
     fallbackMarker: string;
   }>();
+
+  // Suspense render context
+  const suspenseCtx: SuspenseRenderContext = _suspenseContext ?? {
+    boundaryIdCounter: 0,
+    pendingBoundaries: new Map(),
+  };
 
   _boundaryId = 0;
 
@@ -63,8 +87,14 @@ export function renderToReadableStream(
       });
 
       try {
-        // Phase 1: Render shell synchronously
-        const shellHTML = renderToString(tagName, props);
+        // Phase 1: Render shell
+        let shellHTML: string;
+        if (_useSuspense) {
+          // Suspense-aware rendering: catches thrown Promises
+          shellHTML = renderWithSuspense(tagName, props, suspenseCtx);
+        } else {
+          shellHTML = renderToString(tagName, props);
+        }
 
         // Emit shell
         controller.enqueue(encoder.encode(shellHTML));
@@ -77,12 +107,32 @@ export function renderToReadableStream(
           controller.enqueue(encoder.encode(scriptTags));
         }
 
+        // Merge Suspense boundaries into legacy boundaries for unified streaming
+        const allBoundaries = new Map<number, { promise: Promise<string>; fallbackMarker?: string; fallbackHTML?: string }>();
+
+        for (const [id, boundary] of legacyBoundaries) {
+          allBoundaries.set(id, boundary);
+        }
+        for (const [id, boundary] of suspenseCtx.pendingBoundaries) {
+          allBoundaries.set(id, boundary);
+        }
+
         // Phase 2: Stream async chunks (if any pending boundaries exist)
-        if (pendingBoundaries.size > 0) {
-          const promises = Array.from(pendingBoundaries.entries()).map(
+        if (allBoundaries.size > 0) {
+          // Apply timeout to all promises
+          const timeoutPromise = suspenseTimeout > 0
+            ? new Promise<never>((_, reject) => setTimeout(() => reject(new Error('Suspense timeout')), suspenseTimeout))
+            : null;
+
+          const promises = Array.from(allBoundaries.entries()).map(
             async ([id, boundary]) => {
               try {
-                const html = await boundary.promise;
+                let html: string;
+                if (timeoutPromise) {
+                  html = await Promise.race([boundary.promise, timeoutPromise]);
+                } else {
+                  html = await boundary.promise;
+                }
                 if (signal?.aborted) return;
 
                 // Emit replacement chunk: <template> with content + <script> to swap
@@ -131,6 +181,7 @@ export function renderToReadableStream(
  * Build a streaming replacement chunk.
  * Sends a <template> with the resolved content and a <script> to swap it
  * into the DOM, replacing the suspense fallback.
+ * Includes auto-hydration trigger for newly streamed content.
  */
 export function buildReplacementChunk(boundaryId: number, html: string): string {
   return `<template id="$B${boundaryId}-content">${html}</template>` +
@@ -144,6 +195,9 @@ export function buildReplacementChunk(boundaryId: number, html: string): string 
     `d.style.display="contents";` +
     `d.innerHTML=t.innerHTML;` +
     `s.replaceWith(d);` +
+    // Auto-hydrate newly inserted content
+    `var h=d.querySelectorAll("[data-polyx-hydrate]");` +
+    `if(h.length&&window.__POLYX_HYDRATE__)window.__POLYX_HYDRATE__(d);` +
     `}` +
     `t.remove();` +
     `})()` +
