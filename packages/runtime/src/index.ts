@@ -14,12 +14,19 @@ export { initHMR, getHMR } from './hmr.js';
 export { hydrate, isHydrating } from './hydrate.js';
 
 // Priority scheduling
-export { startTransition } from './scheduler.js';
+export { startTransition, shouldYield, scheduleIdle, startIdle } from './scheduler.js';
 
 // Suspense + lazy
 export { lazy, PolyXSuspense } from './suspense.js';
 
-// Keep hooks exports
+// Portal
+export { PolyXPortal, createPortal } from './portal.js';
+
+// DevTools
+export { initDevTools, getDevTools } from './devtools.js';
+export type { ComponentDebugInfo, ProfilingResult } from './devtools.js';
+
+// Hooks
 export {
   useState,
   useEffect,
@@ -29,4 +36,7 @@ export {
   useCallback,
   useTransition,
   useDeferredValue,
+  useReducer,
+  useId,
+  resetIdCounter,
 } from './hooks.js';

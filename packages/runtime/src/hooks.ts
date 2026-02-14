@@ -1,4 +1,4 @@
-import { assertCurrentInstance, getNextHookIndex, setCurrentInstance, getCurrentInstance } from './hooks-internals.js';
+import { assertCurrentInstance, getNextHookIndex, setCurrentInstance, getCurrentInstance, getNextId } from './hooks-internals.js';
 import { startTransitionWithCallback, scheduleTransition } from './scheduler.js';
 import type { ComponentInstance, HookEffect } from '@polyx/core';
 
@@ -153,4 +153,43 @@ export function useDeferredValue<T>(value: T): T {
   return hook.deferredValue;
 }
 
+export function useReducer<S, A>(
+  reducer: (state: S, action: A) => S,
+  initialArg: S,
+  init?: (arg: S) => S
+): [S, (action: A) => void] {
+  const instance = assertCurrentInstance();
+  const index = getNextHookIndex();
+
+  if (instance.hooks.length <= index) {
+    const initialState = init ? init(initialArg) : initialArg;
+    instance.hooks.push(initialState);
+  }
+
+  const state = instance.hooks[index];
+
+  const dispatch = (action: A) => {
+    const currentState = instance.hooks[index];
+    const newState = reducer(currentState, action);
+    if (!Object.is(newState, currentState)) {
+      instance.hooks[index] = newState;
+      instance.render();
+    }
+  };
+
+  return [state, dispatch];
+}
+
+export function useId(): string {
+  const instance = assertCurrentInstance();
+  const index = getNextHookIndex();
+
+  if (instance.hooks.length <= index) {
+    instance.hooks.push(getNextId());
+  }
+
+  return instance.hooks[index];
+}
+
 export { getCurrentInstance, setCurrentInstance } from './hooks-internals.js';
+export { resetIdCounter } from './hooks-internals.js';

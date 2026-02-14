@@ -3,8 +3,9 @@ import { setCurrentInstance } from './hooks-internals.js';
 import { depsChanged } from './hooks.js';
 import { reconcileChildren, reconcileNonKeyed } from './reconcile.js';
 import type { KeyedItem } from './reconcile.js';
-import { isTransition, scheduleTransition } from './scheduler.js';
+import { isTransition, isIdle, scheduleTransition, scheduleIdle } from './scheduler.js';
 import { getHMR } from './hmr.js';
+import { getDevTools } from './devtools.js';
 import { isSuspensePromise, findSuspenseBoundary } from './suspense.js';
 
 export type RenderFn = (instance: any) => void;
@@ -95,11 +96,13 @@ export abstract class PolyXElement extends HTMLElement {
       this._updateDynamicParts();
     }
     getHMR()?.trackInstance(this.tagName.toLowerCase(), this);
+    getDevTools()?._onMount(this);
   }
 
   disconnectedCallback() {
     this._isConnected = false;
     this._cleanup();
+    getDevTools()?._onUnmount(this);
   }
 
   protected abstract _render(): void;
@@ -260,7 +263,15 @@ export abstract class PolyXElement extends HTMLElement {
     // Cancel any pending targeted updates — full update supersedes them
     this._pendingStateKeys = null;
 
-    if (isTransition()) {
+    if (isIdle()) {
+      // Lowest priority: defer to requestIdleCallback
+      scheduleIdle(() => {
+        this._pendingUpdate = false;
+        if (this._isConnected) {
+          this._updateDynamicParts();
+        }
+      });
+    } else if (isTransition()) {
       // Low priority: defer to requestAnimationFrame
       scheduleTransition(() => {
         this._pendingUpdate = false;
@@ -281,6 +292,9 @@ export abstract class PolyXElement extends HTMLElement {
 
   protected _updateDynamicParts() {
     if (!this._isConnected) return;
+
+    const devTools = getDevTools();
+    const startTime = devTools ? performance.now() : 0;
 
     setCurrentInstance(this._instance);
     this._instance.hookIndex = 0;
@@ -304,6 +318,9 @@ export abstract class PolyXElement extends HTMLElement {
       }
     } finally {
       setCurrentInstance(null);
+      if (devTools) {
+        devTools._onUpdate(this, performance.now() - startTime);
+      }
     }
   }
 

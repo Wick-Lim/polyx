@@ -28,3 +28,14 @@ export function assertCurrentInstance(): ComponentInstance {
   }
   return currentInstance;
 }
+
+// Unique ID counter for useId
+let _idCounter = 0;
+
+export function getNextId(): string {
+  return `:r${_idCounter++}:`;
+}
+
+export function resetIdCounter(): void {
+  _idCounter = 0;
+}

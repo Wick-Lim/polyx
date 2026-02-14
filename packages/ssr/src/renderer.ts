@@ -115,8 +115,8 @@ export function renderPage(options: {
 </html>`;
 }
 
-// Extract template HTML from a component class
-function getTemplateHTML(componentClass: any): string | null {
+// Extract template HTML from a component class (exported for streaming SSR)
+export function getTemplateHTML(componentClass: any): string | null {
   const template = componentClass.template;
   if (!template) return null;
 
@@ -132,8 +132,8 @@ function getTemplateHTML(componentClass: any): string | null {
   return null;
 }
 
-// Extract default state values from a compiled component class
-function getStateDefaults(componentClass: any): Record<string, any> {
+// Extract default state values from a compiled component class (exported for streaming SSR)
+export function getStateDefaults(componentClass: any): Record<string, any> {
   const defaults: Record<string, any> = {};
 
   // Check observedAttributes for state names
@@ -147,8 +147,8 @@ function getStateDefaults(componentClass: any): Record<string, any> {
   return defaults;
 }
 
-// Simple HTML parser for templates → VNode tree
-function parseHTML(html: string): VNode[] {
+// Simple HTML parser for templates → VNode tree (exported for streaming SSR)
+export function parseHTML(html: string): VNode[] {
   const results: VNode[] = [];
   let pos = 0;
 
@@ -267,8 +267,8 @@ function findClosingTag(html: string, startPos: number, tagName: string): number
   return -1;
 }
 
-// Render parsed template nodes, replacing dynamic markers with values
-function renderTemplate(nodes: VNode[], state: Record<string, any>): (VNode | VTextNode)[] {
+// Render parsed template nodes, replacing dynamic markers with values (exported for streaming SSR)
+export function renderTemplate(nodes: VNode[], state: Record<string, any>): (VNode | VTextNode)[] {
   const results: (VNode | VTextNode)[] = [];
 
   for (const node of nodes) {

@@ -11,6 +11,8 @@ export const HOOK_TYPES = {
   CONTEXT: 'context',
   TRANSITION: 'transition',
   DEFERRED_VALUE: 'deferred_value',
+  REDUCER: 'reducer',
+  ID: 'id',
 } as const;
 
 export const JSX_PRAGMA = {
