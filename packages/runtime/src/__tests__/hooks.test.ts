@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { useState, useEffect, useLayoutEffect, useRef, useMemo, useCallback } from '../hooks.js';
-import { setCurrentInstance, getCurrentInstance } from '../hooks-internals.js';
+import { setCurrentInstance, getCurrentInstance, getCurrentHookIndex, getNextHookIndex } from '../hooks-internals.js';
 import type { ComponentInstance } from '@polyx/core';
 
 function createMockInstance(): ComponentInstance {
@@ -261,5 +261,63 @@ describe('hooks without instance', () => {
 
   it('should throw when useEffect called without instance', () => {
     expect(() => useEffect(() => {}, [])).toThrow('Hooks can only be called inside a component');
+  });
+});
+
+describe('getCurrentInstance', () => {
+  it('should return null when no instance is set', () => {
+    setCurrentInstance(null);
+    expect(getCurrentInstance()).toBeNull();
+  });
+
+  it('should return the current instance after setCurrentInstance', () => {
+    const instance = createMockInstance();
+    setCurrentInstance(instance);
+    expect(getCurrentInstance()).toBe(instance);
+    setCurrentInstance(null);
+  });
+
+  it('should return null after instance is cleared', () => {
+    const instance = createMockInstance();
+    setCurrentInstance(instance);
+    setCurrentInstance(null);
+    expect(getCurrentInstance()).toBeNull();
+  });
+});
+
+describe('getCurrentHookIndex', () => {
+  it('should return 0 after setCurrentInstance resets the hook index', () => {
+    const instance = createMockInstance();
+    setCurrentInstance(instance);
+    expect(getCurrentHookIndex()).toBe(0);
+    setCurrentInstance(null);
+  });
+
+  it('should return the current hook index after getNextHookIndex increments', () => {
+    const instance = createMockInstance();
+    setCurrentInstance(instance);
+
+    expect(getCurrentHookIndex()).toBe(0);
+    getNextHookIndex(); // increments to 1
+    expect(getCurrentHookIndex()).toBe(1);
+    getNextHookIndex(); // increments to 2
+    expect(getCurrentHookIndex()).toBe(2);
+
+    setCurrentInstance(null);
+  });
+
+  it('should be reset to 0 when setCurrentInstance is called again', () => {
+    const instance = createMockInstance();
+    setCurrentInstance(instance);
+
+    getNextHookIndex(); // 0 -> 1
+    getNextHookIndex(); // 1 -> 2
+    expect(getCurrentHookIndex()).toBe(2);
+
+    // Reset by setting a new instance
+    setCurrentInstance(instance);
+    expect(getCurrentHookIndex()).toBe(0);
+
+    setCurrentInstance(null);
   });
 });

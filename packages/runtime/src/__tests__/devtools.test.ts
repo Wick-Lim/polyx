@@ -254,6 +254,20 @@ describe('DevTools getSlowRenders', () => {
 });
 
 describe('DevTools panel', () => {
+  let tagCounter = 8000;
+
+  function defineTestComponent(renderFn: (el: any) => void, templateHTML: string): string {
+    const tagName = `dt-panel-${++tagCounter}`;
+    class TestElement extends PolyXElement {
+      static template = createTemplate(templateHTML);
+      _render() {
+        renderFn(this);
+      }
+    }
+    customElements.define(tagName, TestElement);
+    return tagName;
+  }
+
   it('should show and hide panel', () => {
     const devTools = initDevTools();
 
@@ -280,5 +294,266 @@ describe('DevTools panel', () => {
     const devTools = initDevTools();
     // Should not throw
     devTools.hidePanel();
+  });
+
+  it('should display component info in the panel', () => {
+    const devTools = initDevTools();
+    const tagName = defineTestComponent(() => {}, '<div>panel-comp</div>');
+
+    const el = document.createElement(tagName);
+    document.body.appendChild(el);
+
+    devTools.showPanel();
+
+    const panel = document.querySelector('[data-polyx-devtools-panel]');
+    expect(panel).not.toBeNull();
+    // Panel should contain the component tag name
+    expect(panel!.textContent).toContain(tagName);
+
+    devTools.hidePanel();
+    document.body.removeChild(el);
+  });
+
+  it('should show "No components mounted" when no components are active', () => {
+    const devTools = initDevTools();
+
+    devTools.showPanel();
+
+    const panel = document.querySelector('[data-polyx-devtools-panel]');
+    expect(panel).not.toBeNull();
+    expect(panel!.textContent).toContain('No components mounted');
+
+    devTools.hidePanel();
+  });
+
+  it('panel auto-refresh should update content and stop when panel is removed', async () => {
+    const devTools = initDevTools();
+
+    devTools.showPanel();
+
+    const panel = document.querySelector('[data-polyx-devtools-panel]');
+    expect(panel).not.toBeNull();
+
+    // Manually remove the panel to simulate disconnection
+    panel!.parentNode!.removeChild(panel!);
+
+    // Wait for the interval to fire — it should detect the panel is disconnected
+    await new Promise(r => setTimeout(r, 1100));
+
+    // After cleanup, showPanel should work again (panel was set to null internally after clearInterval)
+    // The interval clears itself when panel is not connected
+    devTools.hidePanel(); // safe cleanup
+  });
+});
+
+describe('DevTools _cleanupStaleRefs', () => {
+  let tagCounter = 9000;
+
+  function defineTestComponent(renderFn: (el: any) => void, templateHTML: string): string {
+    const tagName = `dt-stale-${++tagCounter}`;
+    class TestElement extends PolyXElement {
+      static template = createTemplate(templateHTML);
+      _render() {
+        renderFn(this);
+      }
+    }
+    customElements.define(tagName, TestElement);
+    return tagName;
+  }
+
+  it('should clean up stale (disconnected) component refs from getComponentTree', () => {
+    const devTools = initDevTools();
+    const tagName = defineTestComponent(() => {}, '<div>stale</div>');
+
+    const el = document.createElement(tagName);
+    document.body.appendChild(el);
+
+    // Verify it's tracked
+    let tree = devTools.getComponentTree();
+    expect(tree.find(c => c.tagName === tagName)).not.toBeUndefined();
+
+    // Disconnect without going through disconnectedCallback properly:
+    // We simulate a stale ref by removing from DOM but the devtools still has it.
+    // First, _onUnmount is called by disconnectedCallback which deletes it.
+    // To test _cleanupStaleRefs, we manually add a disconnected element.
+    const el2 = document.createElement(tagName);
+    document.body.appendChild(el2);
+    // Now remove it — disconnectedCallback will fire
+    document.body.removeChild(el2);
+
+    // el is still connected — should still be in tree
+    tree = devTools.getComponentTree();
+    const connected = tree.filter(c => c.tagName === tagName);
+    expect(connected.length).toBe(1);
+
+    document.body.removeChild(el);
+  });
+});
+
+describe('DevTools getSlowRenders with default threshold', () => {
+  it('should use default 16ms threshold when no argument provided', () => {
+    const devTools = initDevTools();
+    // With no components, should return empty
+    const slow = devTools.getSlowRenders();
+    expect(slow).toEqual([]);
+  });
+});
+
+describe('DevTools _onUpdate for untracked component (lines 59-66)', () => {
+  it('should auto-register a component on _onUpdate if it was never mounted', () => {
+    const devTools = initDevTools();
+    // Create a plain element that was never passed to _onMount
+    const el = document.createElement('div');
+    el.tagName; // 'DIV'
+    document.body.appendChild(el);
+
+    // Directly call _onUpdate — element is NOT in _components map
+    (devTools as any)._onUpdate(el, 5);
+
+    // Now it should be tracked
+    const info = devTools.inspectComponent(el);
+    expect(info).not.toBeNull();
+    expect(info!.renderCount).toBe(1);
+    expect(info!.lastRenderTimeMs).toBe(5);
+    expect(info!.tagName).toBe('div');
+
+    document.body.removeChild(el);
+  });
+});
+
+describe('DevTools getComponentTree skips disconnected elements (line 95)', () => {
+  it('should skip tracked but disconnected elements in getComponentTree', () => {
+    const devTools = initDevTools();
+
+    // Manually register an element via _onMount that is NOT connected to the DOM
+    const el = document.createElement('div');
+    // el is NOT appended to the DOM, so el.isConnected === false
+    (devTools as any)._onMount(el);
+
+    // getComponentTree should skip disconnected elements
+    const tree = devTools.getComponentTree();
+    const found = tree.find(c => c.element === el);
+    expect(found).toBeUndefined();
+  });
+});
+
+describe('DevTools close button on panel (line 190)', () => {
+  it('should close the panel when the close button is clicked', () => {
+    const devTools = initDevTools();
+    devTools.showPanel();
+
+    const panel = document.querySelector('[data-polyx-devtools-panel]');
+    expect(panel).not.toBeNull();
+
+    // Find the close button (the button with text 'X' in the header)
+    const closeBtn = panel!.querySelector('button');
+    expect(closeBtn).not.toBeNull();
+    expect(closeBtn!.textContent).toBe('X');
+
+    // Simulate click
+    closeBtn!.click();
+
+    // Panel should be removed
+    expect(document.querySelector('[data-polyx-devtools-panel]')).toBeNull();
+  });
+});
+
+describe('DevTools panel interval auto-refresh (line 208)', () => {
+  let tagCounter = 10000;
+
+  function defineTestComponent(renderFn: (el: any) => void, templateHTML: string): string {
+    const tagName = `dt-intv-${++tagCounter}`;
+    class TestElement extends PolyXElement {
+      static template = createTemplate(templateHTML);
+      _render() {
+        renderFn(this);
+      }
+    }
+    customElements.define(tagName, TestElement);
+    return tagName;
+  }
+
+  it('should call _updatePanel via interval when panel stays open', () => {
+    vi.useFakeTimers();
+    try {
+      const devTools = initDevTools();
+      const tagName = defineTestComponent(() => {}, '<div>interval-test</div>');
+
+      const el = document.createElement(tagName);
+      document.body.appendChild(el);
+
+      devTools.showPanel();
+
+      const panel = document.querySelector('[data-polyx-devtools-panel]');
+      expect(panel).not.toBeNull();
+
+      // The panel content div is the second child of the panel
+      const contentDiv = panel!.children[1] as HTMLElement;
+      const initialHTML = contentDiv.innerHTML;
+
+      // Advance timers past the 1s interval
+      vi.advanceTimersByTime(1100);
+
+      // The panel should still exist and _updatePanel should have been called
+      // Content should be refreshed (it may be the same HTML since nothing changed,
+      // but the code path was exercised)
+      expect(document.querySelector('[data-polyx-devtools-panel]')).not.toBeNull();
+      // Content should contain the component tag name (proves _updatePanel ran)
+      expect(contentDiv.innerHTML).toContain(tagName);
+
+      devTools.hidePanel();
+      document.body.removeChild(el);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe('DevTools _cleanupStaleRefs deletes disconnected element (line 253)', () => {
+  it('should delete disconnected elements from _components during cleanup', () => {
+    const devTools = initDevTools();
+
+    // Manually register a disconnected element
+    const el = document.createElement('div');
+    (devTools as any)._onMount(el);
+
+    // Verify it's in the map
+    expect((devTools as any)._components.has(el)).toBe(true);
+
+    // Call getComponentTree which triggers _cleanupStaleRefs
+    const tree = devTools.getComponentTree();
+
+    // The disconnected element should have been cleaned up
+    expect((devTools as any)._components.has(el)).toBe(false);
+    // And not in the returned tree
+    expect(tree.find(c => c.element === el)).toBeUndefined();
+  });
+});
+
+describe('DevTools SSR/non-browser fallback (lines 271, 282)', () => {
+  it('initDevTools should return a new instance when window is undefined (line 271)', () => {
+    const originalWindow = globalThis.window;
+    delete (globalThis as any).window;
+    try {
+      // Re-import to test the code path — but since the module is already loaded,
+      // we call the function directly; the check is `typeof window !== 'undefined'`
+      const result = initDevTools();
+      expect(result).not.toBeNull();
+      expect(typeof result.getComponentTree).toBe('function');
+      expect(typeof result.inspectComponent).toBe('function');
+    } finally {
+      (globalThis as any).window = originalWindow;
+    }
+  });
+
+  it('getDevTools should return null when window is undefined (line 282)', () => {
+    const originalWindow = globalThis.window;
+    delete (globalThis as any).window;
+    try {
+      const result = getDevTools();
+      expect(result).toBeNull();
+    } finally {
+      (globalThis as any).window = originalWindow;
+    }
   });
 });

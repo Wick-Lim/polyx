@@ -17,6 +17,8 @@ interface StreamOptions {
   onError?: (error: Error) => void;
   /** AbortSignal to cancel streaming */
   signal?: AbortSignal;
+  /** @internal Inject pending boundaries for testing */
+  _pendingBoundaries?: Map<number, { promise: Promise<string>; fallbackMarker: string }>;
 }
 
 // Unique boundary ID counter
@@ -36,9 +38,9 @@ export function renderToReadableStream(
   props: Record<string, any> = {},
   options: StreamOptions = {}
 ): ReadableStream<Uint8Array> {
-  const { bootstrapScripts = [], onError, signal } = options;
+  const { bootstrapScripts = [], onError, signal, _pendingBoundaries } = options;
   const encoder = new TextEncoder();
-  const pendingBoundaries = new Map<number, {
+  const pendingBoundaries = _pendingBoundaries ?? new Map<number, {
     promise: Promise<string>;
     fallbackMarker: string;
   }>();
@@ -130,7 +132,7 @@ export function renderToReadableStream(
  * Sends a <template> with the resolved content and a <script> to swap it
  * into the DOM, replacing the suspense fallback.
  */
-function buildReplacementChunk(boundaryId: number, html: string): string {
+export function buildReplacementChunk(boundaryId: number, html: string): string {
   return `<template id="$B${boundaryId}-content">${html}</template>` +
     `<script>` +
     `(function(){` +

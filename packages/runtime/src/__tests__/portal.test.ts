@@ -158,4 +158,159 @@ describe('PolyXPortal custom element', () => {
 
     document.body.removeChild(portal);
   });
+
+  it('should resolve target from CSS selector string via property setter', async () => {
+    const portal = document.createElement('polyx-portal') as any;
+    portal.target = '#modal-root';
+
+    const child = document.createElement('div');
+    child.className = 'selector-content';
+    child.textContent = 'Selector Portal';
+    portal.appendChild(child);
+
+    document.body.appendChild(portal);
+
+    await new Promise(r => setTimeout(r, 10));
+
+    const portalWrapper = targetContainer.querySelector('[data-polyx-portal]');
+    expect(portalWrapper).not.toBeNull();
+    expect(portalWrapper!.textContent).toContain('Selector Portal');
+
+    document.body.removeChild(portal);
+  });
+
+  it('should set target to null when null is passed via property setter', () => {
+    const portal = document.createElement('polyx-portal') as any;
+    portal.target = targetContainer;
+    expect(portal.target).toBe(targetContainer);
+
+    portal.target = null;
+    // After setting null, the target getter should fallback to attribute
+    // Since no attribute is set, it returns null
+    expect(portal.target).toBeNull();
+  });
+
+  it('should call _moveChildren when target is set while connected', async () => {
+    const portal = document.createElement('polyx-portal') as any;
+
+    // Connect the portal without a target first
+    document.body.appendChild(portal);
+
+    await new Promise(r => setTimeout(r, 10));
+
+    // No portal container should exist since there's no target
+    expect(targetContainer.querySelector('[data-polyx-portal]')).toBeNull();
+
+    // Add a child to the portal
+    const child = document.createElement('div');
+    child.className = 'late-target-content';
+    child.textContent = 'Late target';
+    portal.appendChild(child);
+
+    await new Promise(r => setTimeout(r, 10));
+
+    // Now set the target while connected — this should trigger _moveChildren (line 35)
+    portal.target = targetContainer;
+
+    await new Promise(r => setTimeout(r, 10));
+
+    // The portal container should now be created in the target
+    const portalWrapper = targetContainer.querySelector('[data-polyx-portal]');
+    expect(portalWrapper).not.toBeNull();
+
+    document.body.removeChild(portal);
+  });
+
+  it('should observe dynamically added children via MutationObserver', async () => {
+    const portal = document.createElement('polyx-portal') as any;
+    portal.target = targetContainer;
+
+    document.body.appendChild(portal);
+
+    await new Promise(r => setTimeout(r, 10));
+
+    // Dynamically add a child after the portal is connected
+    const dynamicChild = document.createElement('div');
+    dynamicChild.className = 'dynamic-child';
+    dynamicChild.textContent = 'Dynamic';
+    portal.appendChild(dynamicChild);
+
+    // Wait for MutationObserver to fire
+    await new Promise(r => setTimeout(r, 50));
+
+    const portalWrapper = targetContainer.querySelector('[data-polyx-portal]');
+    expect(portalWrapper).not.toBeNull();
+    expect(portalWrapper!.querySelector('.dynamic-child')).not.toBeNull();
+
+    document.body.removeChild(portal);
+  });
+
+  it('should disconnect MutationObserver and clean up portal container on disconnect', async () => {
+    const portal = document.createElement('polyx-portal') as any;
+    portal.target = targetContainer;
+
+    const child = document.createElement('div');
+    child.textContent = 'Cleanup test';
+    portal.appendChild(child);
+
+    document.body.appendChild(portal);
+
+    await new Promise(r => setTimeout(r, 10));
+
+    // Verify portal container exists
+    expect(targetContainer.querySelector('[data-polyx-portal]')).not.toBeNull();
+
+    // Disconnect
+    document.body.removeChild(portal);
+
+    // Portal container should be removed
+    expect(targetContainer.querySelector('[data-polyx-portal]')).toBeNull();
+
+    // Re-appending should work again (observer was cleaned up)
+    portal.target = targetContainer;
+    document.body.appendChild(portal);
+    await new Promise(r => setTimeout(r, 10));
+
+    document.body.removeChild(portal);
+  });
+
+  it('should reconnect observer after moving children in _moveChildren', async () => {
+    const portal = document.createElement('polyx-portal') as any;
+    portal.target = targetContainer;
+
+    document.body.appendChild(portal);
+
+    await new Promise(r => setTimeout(r, 10));
+
+    // Add child after portal is connected — observer should detect it
+    const child1 = document.createElement('div');
+    child1.className = 'child1';
+    portal.appendChild(child1);
+
+    await new Promise(r => setTimeout(r, 50));
+
+    // child1 should have been moved
+    const portalWrapper = targetContainer.querySelector('[data-polyx-portal]');
+    expect(portalWrapper).not.toBeNull();
+    expect(portalWrapper!.querySelector('.child1')).not.toBeNull();
+
+    // Add another child — observer should still work (was reconnected)
+    const child2 = document.createElement('div');
+    child2.className = 'child2';
+    portal.appendChild(child2);
+
+    await new Promise(r => setTimeout(r, 50));
+
+    expect(portalWrapper!.querySelector('.child2')).not.toBeNull();
+
+    document.body.removeChild(portal);
+  });
+
+  it('target getter should return attribute when no property target is set', () => {
+    const portal = document.createElement('polyx-portal') as any;
+    portal.setAttribute('target', '#some-selector');
+
+    // No property set, so getter returns the attribute value
+    expect(portal.target).toBe('#some-selector');
+  });
 });

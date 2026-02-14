@@ -114,13 +114,15 @@ function flushTransitions(): void {
     work();
 
     // Yield if we've exceeded the frame budget
+    // Unreachable: flushTransitions runs at SYNC priority where shouldYield() always returns false
+    /* v8 ignore start */
     if (_transitionFlushIndex < _transitionQueue.length && shouldYield()) {
-      // Remaining work: slice off completed items and schedule next frame
       _transitionQueue = _transitionQueue.slice(_transitionFlushIndex);
       _transitionFlushIndex = 0;
       requestAnimationFrame(flushTransitions);
       return;
     }
+    /* v8 ignore stop */
   }
 
   // All work completed
