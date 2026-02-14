@@ -90,13 +90,13 @@ export abstract class PolyXElement extends HTMLElement {
       Object.assign(this._props, (this as any).__pendingPolyXProps);
       delete (this as any).__pendingPolyXProps;
     }
+    getHMR()?.trackInstance(this.tagName.toLowerCase(), this);
+    getDevTools()?._onMount(this);
     if (!this._hasMounted) {
       this._mount();
     } else {
       this._updateDynamicParts();
     }
-    getHMR()?.trackInstance(this.tagName.toLowerCase(), this);
-    getDevTools()?._onMount(this);
   }
 
   disconnectedCallback() {
