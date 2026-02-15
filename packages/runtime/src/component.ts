@@ -7,6 +7,7 @@ import { isTransition, isIdle, scheduleTransition, scheduleIdle } from './schedu
 import { getHMR } from './hmr.js';
 import { getDevTools } from './devtools.js';
 import { isSuspensePromise, findSuspenseBoundary } from './suspense.js';
+import { acquireNode, releaseNode } from './pool.js';
 
 export type RenderFn = (instance: any) => void;
 
@@ -162,8 +163,11 @@ export abstract class PolyXElement extends HTMLElement {
     if (hook && typeof hook === 'object') {
       // useMemo/useCallback: { value, deps }
       if ('deps' in hook && 'value' in hook) return hook.value;
-      // useContext: { provider, unsubscribe, ... }
+      // useContext: { provider, unsubscribe, selector?, selectedValue?, ... }
       if ('provider' in hook) {
+        if (hook.selector && hook.provider) {
+          return hook.selectedValue;
+        }
         return hook.provider ? hook.provider.value : undefined;
       }
     }
@@ -385,6 +389,8 @@ export abstract class PolyXElement extends HTMLElement {
       if (current.parentNode) {
         current.parentNode.replaceChild(newNode, current);
       }
+      // Release the old node to the recycling pool
+      releaseNode(current);
       this._valueMarkers[index] = newNode;
     }
   }
@@ -413,7 +419,7 @@ export abstract class PolyXElement extends HTMLElement {
     } else if (value instanceof Node) {
       return value;
     } else if (typeof value === 'string' && value.startsWith('polyx-')) {
-      return document.createElement(value);
+      return acquireNode(value) as Node || document.createElement(value);
     } else {
       return document.createTextNode(String(value));
     }
@@ -421,7 +427,7 @@ export abstract class PolyXElement extends HTMLElement {
 
   // Create or reuse a child component element with props
   protected _createChild(tagName: string, props?: Record<string, any>): HTMLElement {
-    const el = document.createElement(tagName);
+    const el = (acquireNode(tagName) as HTMLElement) || document.createElement(tagName);
     if (props) {
       if ('_setProps' in el) {
         (el as any)._setProps(props);
@@ -460,9 +466,10 @@ export abstract class PolyXElement extends HTMLElement {
       }
     });
 
-    // Remove old items not in new list
+    // Remove old items not in new list and release to pool
     for (const [, item] of oldKeyMap) {
       item.node.parentNode?.removeChild(item.node);
+      releaseNode(item.node);
     }
 
     // LIS-based minimal DOM moves

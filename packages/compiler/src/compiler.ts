@@ -323,6 +323,95 @@ function transformComponent(
     }
   });
 
+  // Auto-memoization pass: wrap inline functions/objects/arrays passed to child components
+  // that reference state/derived values with _execMemo to prevent unnecessary child re-renders
+  if (states.length > 0 && dynamicChildProps.length > 0) {
+    // Pre-count hooks in filteredBody to assign auto-memo indices after existing hooks
+    const hookTypeNamesForAutoMemo = new Set(['useMemo', 'useCallback', 'useEffect', 'useLayoutEffect', 'useRef', 'useContext']);
+    let autoMemoNextIndex = 0;
+    const derivedVarNamesForAutoMemo = new Set<string>();
+
+    filteredBody.forEach(stmt => {
+      let isHook = false;
+      let varName: string | null = null;
+
+      if (t.isVariableDeclaration(stmt)) {
+        const decl = stmt.declarations[0];
+        if (decl && t.isCallExpression(decl.init) && t.isIdentifier(decl.init.callee) && hookTypeNamesForAutoMemo.has(decl.init.callee.name)) {
+          isHook = true;
+          if (t.isIdentifier(decl.id)) varName = decl.id.name;
+        }
+      } else if (t.isExpressionStatement(stmt) && t.isCallExpression(stmt.expression) && t.isIdentifier(stmt.expression.callee) && hookTypeNamesForAutoMemo.has(stmt.expression.callee.name)) {
+        isHook = true;
+      }
+
+      if (isHook) {
+        autoMemoNextIndex++;
+        if (varName) derivedVarNamesForAutoMemo.add(varName);
+      }
+    });
+
+    // Collect prop names from destructured function params for dep tracking
+    const propNamesForAutoMemo = new Set<string>();
+    if (func.params.length > 0) {
+      const param = func.params[0];
+      const extractFromPattern = (pattern: t.ObjectPattern) => {
+        pattern.properties.forEach(p => {
+          if (t.isObjectProperty(p)) {
+            const value = p.value;
+            if (t.isIdentifier(value)) {
+              propNamesForAutoMemo.add(value.name);
+            } else if (t.isAssignmentPattern(value) && t.isIdentifier(value.left)) {
+              propNamesForAutoMemo.add(value.left.name);
+            }
+          } else if (t.isRestElement(p) && t.isIdentifier(p.argument)) {
+            propNamesForAutoMemo.add(p.argument.name);
+          }
+        });
+      };
+
+      if (t.isObjectPattern(param)) {
+        extractFromPattern(param);
+      } else if (t.isAssignmentPattern(param) && t.isObjectPattern(param.left)) {
+        extractFromPattern(param.left);
+      }
+    }
+
+    const stateNameSetForAutoMemo = new Set(states.map(s => s.name));
+    // Track state, derived hooks, and props for dep detection
+    const autoMemoTrackable = new Set([...stateNameSetForAutoMemo, ...derivedVarNamesForAutoMemo, ...propNamesForAutoMemo]);
+
+    dynamicChildProps.forEach(prop => {
+      const expr = prop.expr;
+
+      // Only auto-memo inline expressions that create new references each render
+      const isCandidate = (
+        t.isArrowFunctionExpression(expr) ||
+        t.isFunctionExpression(expr) ||
+        t.isObjectExpression(expr) ||
+        t.isArrayExpression(expr) ||
+        (t.isCallExpression(expr) && !t.isMemberExpression(expr.callee))
+      );
+      if (!isCandidate) return;
+
+      // Find all referenced identifiers from the trackable set
+      const refs = findIdentifierRefs(expr, autoMemoTrackable);
+      // Must reference at least one state or derived variable (not just props)
+      const hasStateDep = [...refs].some(r => stateNameSetForAutoMemo.has(r) || derivedVarNamesForAutoMemo.has(r));
+      if (!hasStateDep) return;
+
+      const hookIdx = autoMemoNextIndex++;
+      const depIdentifiers = [...refs].map(name => t.identifier(name));
+      const depsArray = t.arrayExpression(depIdentifiers);
+
+      // Replace expression with inline _execMemo call
+      prop.expr = t.callExpression(
+        t.memberExpression(t.thisExpression(), t.identifier('_execMemo')),
+        [t.numericLiteral(hookIdx), t.arrowFunctionExpression([], expr), depsArray]
+      );
+    });
+  }
+
   // Create class body members
   const classMembers: any[] = [];
 

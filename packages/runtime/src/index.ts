@@ -23,6 +23,9 @@ export { lazy, PolyXSuspense } from './suspense.js';
 // Portal
 export { PolyXPortal, createPortal } from './portal.js';
 
+// DOM Recycling Pool
+export { enableDOMRecycling, disableDOMRecycling, acquireNode, releaseNode, clearPool, isPoolEnabled, getPoolSize, getPoolSizeFor } from './pool.js';
+
 // DevTools
 export { initDevTools, getDevTools } from './devtools.js';
 export type { ComponentDebugInfo, ProfilingResult } from './devtools.js';

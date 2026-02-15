@@ -65,7 +65,10 @@ export function createContext<T>(defaultValue: T): PolyXContext<T> {
 }
 
 // useContext hook — traverses DOM tree to find nearest Provider (cached after first call)
-export function useContext<T>(context: PolyXContext<T>): T {
+// Overload: useContext(ctx) returns full value; useContext(ctx, selector) returns selected slice
+export function useContext<T>(context: PolyXContext<T>): T;
+export function useContext<T, S>(context: PolyXContext<T>, selector: (value: T) => S): S;
+export function useContext<T, S>(context: PolyXContext<T>, selector?: (value: T) => S): T | S {
   const instance = assertCurrentInstance();
   const index = getNextHookIndex();
 
@@ -73,9 +76,12 @@ export function useContext<T>(context: PolyXContext<T>): T {
   if (instance.hooks.length > index) {
     const hook = instance.hooks[index];
     if (hook && hook.provider) {
+      if (hook.selector) {
+        return hook.selectedValue;
+      }
       return hook.provider.value;
     }
-    return context._defaultValue;
+    return selector ? selector(context._defaultValue) : context._defaultValue;
   }
 
   // First call: walk DOM to find provider
@@ -91,18 +97,33 @@ export function useContext<T>(context: PolyXContext<T>): T {
   }
 
   if (!provider) {
-    instance.hooks.push({ provider: null, unsubscribe: null });
-    return context._defaultValue;
+    const defaultSelected = selector ? selector(context._defaultValue) : null;
+    instance.hooks.push({ provider: null, unsubscribe: null, selector: selector || null, selectedValue: defaultSelected });
+    return selector ? defaultSelected as S : context._defaultValue;
   }
 
+  const initialSelected = selector ? selector(provider.value) : null;
+
   const unsubscribe = provider.subscribe(() => {
-    instance.render();
+    if (selector) {
+      const newSelected = selector(provider.value);
+      const hook = instance.hooks[index];
+      if (newSelected !== hook.selectedValue) {
+        hook.selectedValue = newSelected;
+        instance.render();
+      }
+      // If selected value unchanged, skip re-render
+    } else {
+      instance.render();
+    }
   });
   instance.hooks.push({
     provider,
     unsubscribe,
     cleanup: unsubscribe,
+    selector: selector || null,
+    selectedValue: initialSelected,
   });
 
-  return provider.value;
+  return selector ? initialSelected as S : provider.value;
 }

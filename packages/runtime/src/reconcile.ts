@@ -1,5 +1,7 @@
 // Keyed reconciliation using Longest Increasing Subsequence (LIS) for minimal DOM moves
 
+import { releaseNode } from './pool.js';
+
 export interface KeyedItem {
   key: string | number;
   node: Node;
@@ -43,8 +45,11 @@ export function reconcileChildren(
   newItems: KeyedItem[]
 ): void {
   if (newItems.length === 0) {
-    // Remove all old items
-    oldItems.forEach(item => item.node.parentNode?.removeChild(item.node));
+    // Remove all old items and release to pool
+    oldItems.forEach(item => {
+      item.node.parentNode?.removeChild(item.node);
+      releaseNode(item.node);
+    });
     return;
   }
 
@@ -71,7 +76,10 @@ export function reconcileChildren(
       toRemove.push(item.node);
     }
   });
-  toRemove.forEach(node => node.parentNode?.removeChild(node));
+  toRemove.forEach(node => {
+    node.parentNode?.removeChild(node);
+    releaseNode(node);
+  });
 
   // For each new item, record its old index (-1 if new)
   const oldIndices: number[] = newItems.map(item => {
@@ -156,6 +164,7 @@ export function reconcileNonKeyed(
         newNodes.push(oldNode);
       } else {
         oldNode.parentNode?.replaceChild(newNode, oldNode);
+        releaseNode(oldNode);
         newNodes.push(newNode);
       }
     } else {
@@ -170,9 +179,10 @@ export function reconcileNonKeyed(
     }
   }
 
-  // Remove excess old nodes
+  // Remove excess old nodes and release to pool
   for (let i = newValues.length; i < oldNodes.length; i++) {
     oldNodes[i].parentNode?.removeChild(oldNodes[i]);
+    releaseNode(oldNodes[i]);
   }
 
   return newNodes;
